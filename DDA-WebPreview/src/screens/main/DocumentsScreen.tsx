@@ -175,14 +175,74 @@ export const DocumentsScreen: React.FC = () => {
   // PDF Export & Native Sharing Logic
   // ---------------------------------------------------------------------------
 
+  const buildDynamicPdfRows = (doc: DocumentMetadata): string => {
+    const rows: { label: string; value: string }[] = [];
+
+    rows.push({ label: 'Document Name', value: doc.documentName });
+    rows.push({ label: 'Type', value: doc.documentType });
+
+    if (doc.documentNumber && doc.documentNumber.trim()) {
+      rows.push({ label: 'Document Number', value: doc.documentNumber.trim() });
+    }
+    if (doc.name && doc.name.trim()) {
+      rows.push({ label: 'Holder Name', value: doc.name.trim() });
+    }
+    if (doc.fatherName && doc.fatherName.trim()) {
+      rows.push({ label: 'Father / Relative Name', value: doc.fatherName.trim() });
+    }
+    if (doc.gender && doc.gender.trim()) {
+      rows.push({ label: 'Gender', value: doc.gender.trim() });
+    }
+    if (doc.dateOfBirth && doc.dateOfBirth.trim()) {
+      rows.push({ label: 'Date of Birth', value: doc.dateOfBirth.trim() });
+    }
+    if (doc.address && doc.address.trim()) {
+      rows.push({ label: 'Address', value: doc.address.trim() });
+    }
+    if (doc.issueDate && doc.issueDate.trim()) {
+      rows.push({ label: 'Issue Date', value: doc.issueDate.trim() });
+    }
+    if (doc.expiryDate && doc.expiryDate.trim()) {
+      rows.push({ label: 'Expiry Date', value: doc.expiryDate.trim() });
+    }
+
+    if (doc.fields && typeof doc.fields === 'object') {
+      Object.entries(doc.fields).forEach(([key, val]) => {
+        if (val && typeof val === 'string' && val.trim()) {
+          const formattedLabel = key
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/_/g, ' ')
+            .replace(/^\w/, c => c.toUpperCase())
+            .trim();
+
+          const exists = rows.some(r => r.label.toLowerCase() === formattedLabel.toLowerCase());
+          if (!exists) {
+            rows.push({ label: formattedLabel, value: val.trim() });
+          }
+        }
+      });
+    }
+
+    return rows
+      .map(r => `<tr><th>${r.label}</th><td>${r.value}</td></tr>`)
+      .join('\n            ');
+  };
+
   const generatePdfFile = async (doc: DocumentMetadata): Promise<string> => {
-    const fieldsEntries = doc.fields ? Object.entries(doc.fields) : [];
-    const rawImageSource = doc.fileUrl || doc.localFileUri;
+    console.log(`[PDF Log 1] Generating PDF for: ${doc.documentName}`);
+
+    // Prioritize cropped image path over original raw image
+    const rawImageSource = doc.croppedImagePath || doc.localFileUri || doc.fileUrl;
+    console.log(`[PDF Log 1.1] Resolved Cropped Image Source: ${rawImageSource || 'None'}`);
+
     let base64ImageDataUrl: string | null = null;
 
     if (rawImageSource) {
       base64ImageDataUrl = await getImageBase64DataUrl(rawImageSource);
+      console.log(`[PDF Log 1.2] Base64 image status: ${base64ImageDataUrl ? 'Converted' : 'Failed'}`);
     }
+
+    const dynamicTableRows = buildDynamicPdfRows(doc);
 
     const htmlContent = `
       <!DOCTYPE html>
@@ -211,17 +271,12 @@ export const DocumentsScreen: React.FC = () => {
           </div>
 
           <table class="table">
-            <tr><th>Document Name</th><td>${doc.documentName}</td></tr>
-            <tr><th>Document Type</th><td>${doc.documentType}</td></tr>
-            ${doc.documentNumber ? `<tr><th>Document Number</th><td>${doc.documentNumber}</td></tr>` : ''}
-            ${doc.issueDate ? `<tr><th>Issue Date</th><td>${doc.issueDate}</td></tr>` : ''}
-            ${doc.expiryDate ? `<tr><th>Expiry Date</th><td>${doc.expiryDate}</td></tr>` : ''}
-            ${fieldsEntries.map(([k, v]) => `<tr><th>${k.replace(/_/g, ' ')}</th><td>${v}</td></tr>`).join('')}
+            ${dynamicTableRows}
           </table>
 
           ${base64ImageDataUrl ? `
             <div class="image-container">
-              <h3>Original Document Image</h3>
+              <h3 style="color: #1e3a8a; font-size: 14px;">CROPPED DOCUMENT IMAGE</h3>
               <img src="${base64ImageDataUrl}" class="doc-image" />
             </div>
           ` : ''}
@@ -233,24 +288,37 @@ export const DocumentsScreen: React.FC = () => {
       </html>
     `;
 
+    console.log('[PDF Log 1.3] Calling Print.printToFileAsync for binary PDF');
     const { uri } = await Print.printToFileAsync({ html: htmlContent });
+    console.log(`[PDF Log 1.4] Binary PDF generated successfully at URI: ${uri}`);
     return uri;
   };
 
   const handleSavePdf = async () => {
     if (!selectedDoc) return;
+    console.log(`[PDF Log 2] handleSavePdf triggered for: ${selectedDoc.documentName}`);
     setIsExporting(true);
+
     try {
-      const pdfUri = await generatePdfFile(selectedDoc);
+      const pdfPromise = generatePdfFile(selectedDoc);
+      const timeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
+      );
+
+      const pdfUri = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 2.1] PDF URI generated for save: ${pdfUri}`);
+
       const sanitizedDocNumber = (selectedDoc.documentNumber || 'Document').replace(/[^a-zA-Z0-9_-]/g, '_');
       const sanitizedDocType = selectedDoc.documentType.replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `${sanitizedDocType}_${sanitizedDocNumber}.pdf`;
 
       if (Platform.OS === 'android' && StorageAccessFramework) {
         try {
+          console.log('[PDF Log 2.2] Requesting StorageAccessFramework directory permissions');
           const saf = StorageAccessFramework;
           const permissions = await saf.requestDirectoryPermissionsAsync();
           if (permissions.granted) {
+            console.log('[PDF Log 2.3] Directory permissions granted. Writing file.');
             const base64Data = await readAsStringAsync(pdfUri, { encoding: EncodingType.Base64 });
             const newFileUri = await saf.createFileAsync(
               permissions.directoryUri,
@@ -258,21 +326,24 @@ export const DocumentsScreen: React.FC = () => {
               'application/pdf'
             );
             await writeAsStringAsync(newFileUri, base64Data, { encoding: EncodingType.Base64 });
+            console.log(`[PDF Log 2.4] PDF saved successfully via SAF: ${newFileUri}`);
             Alert.alert('PDF Saved', `PDF saved successfully as "${fileName}".`);
             return;
           }
-        } catch (safErr) {
-          // Fallback below
+        } catch (safErr: any) {
+          console.warn(`[PDF Log 2.5] SAF Save fallback: ${safErr?.message}`);
         }
       }
 
       if (await Sharing.isAvailableAsync()) {
+        console.log('[PDF Log 2.6] Using Sharing dialog to save PDF');
         await Sharing.shareAsync(pdfUri, { mimeType: 'application/pdf', dialogTitle: `Save ${fileName}` });
-        Alert.alert('PDF Saved', 'PDF saved successfully.');
+        Alert.alert('PDF Saved', 'PDF file ready and saved successfully.');
       } else {
         Alert.alert('PDF Saved', `PDF file generated successfully at ${pdfUri}`);
       }
     } catch (err: any) {
+      console.error('[PDF Log 2.7] handleSavePdf error:', err);
       Alert.alert('Save PDF Failed', err?.message || 'Could not save PDF.');
     } finally {
       setIsExporting(false);
@@ -281,19 +352,34 @@ export const DocumentsScreen: React.FC = () => {
 
   const handleSharePdf = async () => {
     if (!selectedDoc) return;
+    console.log(`[PDF Log 3] handleSharePdf triggered for: ${selectedDoc.documentName}`);
     setIsExporting(true);
+
     try {
-      const pdfUri = await generatePdfFile(selectedDoc);
+      const pdfPromise = generatePdfFile(selectedDoc);
+      const timeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
+      );
+
+      const pdfUri = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 3.1] PDF URI generated for sharing: ${pdfUri}`);
+
       if (await Sharing.isAvailableAsync()) {
+        console.log('[PDF Log 3.2] Launching native Share sheet with mimeType application/pdf');
         await Sharing.shareAsync(pdfUri, {
           mimeType: 'application/pdf',
           dialogTitle: `Share ${selectedDoc.documentName} PDF`,
+          UTI: 'com.adobe.pdf',
         });
+        console.log('[PDF Log 3.3] Share sheet launched successfully');
       } else {
         Alert.alert('Sharing Unavailable', 'Native sharing is not supported on this device.');
       }
     } catch (err: any) {
-      Alert.alert('Share Failed', err?.message || 'Could not share document.');
+      console.error('[PDF Log 3.4] handleSharePdf error:', err);
+      if (err?.message !== 'User cancelled') {
+        Alert.alert('Unable to Share PDF', err?.message || 'Could not share PDF.');
+      }
     } finally {
       setIsExporting(false);
     }
@@ -474,6 +560,41 @@ export const DocumentsScreen: React.FC = () => {
                       <View style={styles.detailRow}>
                         <Text style={styles.detailLabel}>Document Number</Text>
                         <Text style={styles.detailValue}>{selectedDoc.documentNumber}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.name ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Holder Name</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.name}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.fatherName ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Father / Relative Name</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.fatherName}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.gender ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Gender</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.gender}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.dateOfBirth ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Date of Birth</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.dateOfBirth}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.address ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Address</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.address}</Text>
                       </View>
                     ) : null}
 

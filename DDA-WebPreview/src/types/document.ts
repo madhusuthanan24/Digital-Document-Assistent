@@ -15,10 +15,18 @@ export interface DocumentMetadata {
   documentType: DocumentCategory;
   documentName: string;
   documentNumber: string;
+  name?: string;
+  fatherName?: string;
+  gender?: string;
+  address?: string;
+  dateOfBirth?: string;
   issueDate?: string;
   expiryDate?: string;
   localFileUri?: string;
   fileUrl?: string;
+  imagePath?: string;
+  croppedImagePath?: string;
+  originalImagePath?: string;
   fileName?: string;
   mimeType?: string;
   fields?: Record<string, string>;

@@ -17,7 +17,8 @@
  * No sensitive document data or base64 strings are logged.
  */
 
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import ImageEditor from '@react-native-community/image-editor';
+import { Image } from 'react-native';
 import {
   NVIDIA_API_KEY,
   NVIDIA_ENDPOINT,
@@ -48,11 +49,24 @@ function logError(stage: string, msg: string) {
 // ---------------------------------------------------------------------------
 async function prepareOcrImage(uri: string): Promise<string> {
   try {
-    const result = await manipulateAsync(
-      uri,
-      [{ resize: { width: 1280 } }],
-      { compress: 0.75, format: SaveFormat.JPEG }
+    // Measure the original image so we can compute a proportional resize target.
+    const { width: origW, height: origH } = await new Promise<{ width: number; height: number }>(
+      (resolve, reject) => Image.getSize(uri, (w, h) => resolve({ width: w, height: h }), reject)
     );
+
+    // Resize to at most 1280px on the long edge, keeping aspect ratio.
+    const TARGET = 1280;
+    const scale = Math.min(1, TARGET / Math.max(origW, origH));
+    const targetW = Math.round(origW * scale);
+    const targetH = Math.round(origH * scale);
+
+    const result = await ImageEditor.cropImage(uri, {
+      offset: { x: 0, y: 0 },
+      size: { width: origW, height: origH },
+      displaySize: { width: targetW, height: targetH },
+      quality: 0.75,
+      format: 'jpeg',
+    });
     console.log('[OCR][IMAGE_PREP] success');
     logStage('Image prepared');
     return result.uri;

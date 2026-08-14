@@ -20,15 +20,28 @@ const createDocument = async (req, res) => {
       dateOfBirth,
       issueDate,
       expiryDate,
+      fields: bodyFields,
+      imagePath: bodyImagePath,
     } = req.body;
-    const userId = req.user.userId;
+    const userId = req.user?.userId || req.body.userId;
+
+    console.log(`[Document] Saving document: type="${documentType}", name="${documentName}"`);
 
     if (!documentType || !documentName) {
       return errorResponse(res, 'documentType and documentName are required', 400);
     }
 
-    const imagePath = req.file ? `/uploads/${req.file.filename}` : null;
-    const mimeType = req.file ? req.file.mimetype : null;
+    const imagePath = req.file ? `/uploads/${req.file.filename}` : (bodyImagePath || null);
+    const mimeType = req.file ? req.file.mimetype : (req.body.mimeType || 'image/jpeg');
+
+    let fieldsStr = null;
+    if (typeof bodyFields === 'string') {
+      fieldsStr = bodyFields;
+    } else if (typeof bodyFields === 'object' && bodyFields !== null) {
+      fieldsStr = JSON.stringify(bodyFields);
+    }
+
+    console.log(`[Document] Image path: ${imagePath}, fields: ${fieldsStr}`);
 
     const document = await prisma.document.create({
       data: {
@@ -43,10 +56,15 @@ const createDocument = async (req, res) => {
         dateOfBirth: dateOfBirth || null,
         issueDate: issueDate || null,
         expiryDate: expiryDate || null,
+        fields: fieldsStr,
         imagePath,
+        croppedImagePath: imagePath,
+        originalImagePath: req.body.originalImagePath || null,
         mimeType,
       },
     });
+
+    console.log(`[Document] PostgreSQL document created: id=${document.id}`);
 
     return successResponse(res, document, 'Document created successfully', 201);
   } catch (error) {
@@ -118,11 +136,19 @@ const updateDocument = async (req, res) => {
       dateOfBirth,
       issueDate,
       expiryDate,
+      fields: bodyFields,
     } = req.body;
 
     const existing = await prisma.document.findFirst({ where: { id, userId } });
     if (!existing) {
       return errorResponse(res, 'Document not found', 404);
+    }
+
+    let fieldsStr = existing.fields;
+    if (typeof bodyFields === 'string') {
+      fieldsStr = bodyFields;
+    } else if (typeof bodyFields === 'object' && bodyFields !== null) {
+      fieldsStr = JSON.stringify(bodyFields);
     }
 
     const newImagePath = req.file ? `/uploads/${req.file.filename}` : existing.imagePath;
@@ -149,6 +175,7 @@ const updateDocument = async (req, res) => {
         dateOfBirth: dateOfBirth !== undefined ? dateOfBirth : existing.dateOfBirth,
         issueDate: issueDate !== undefined ? issueDate : existing.issueDate,
         expiryDate: expiryDate !== undefined ? expiryDate : existing.expiryDate,
+        fields: fieldsStr,
         imagePath: newImagePath,
         mimeType: newMimeType,
       },
@@ -243,6 +270,45 @@ const getExpiryReminders = async (req, res) => {
   }
 };
 
+/**
+ * Get Document Image (Authenticated & Ownership Verified)
+ * GET /api/documents/:id/image
+ */
+const getDocumentImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.userId || req.headers['x-user-id'];
+
+    console.log(`[Vault] Loading document image: id=${id}`);
+
+    if (!id || !userId) {
+      return errorResponse(res, 'Document ID and user ID are required', 400);
+    }
+
+    const document = await prisma.document.findFirst({
+      where: { id, userId },
+    });
+
+    const targetPath = document?.croppedImagePath || document?.imagePath;
+
+    if (!document || !targetPath) {
+      return errorResponse(res, 'Document or image not found', 404);
+    }
+
+    const cleanPath = targetPath.startsWith('/') ? targetPath.slice(1) : targetPath;
+    const fullPath = path.join(__dirname, '../../', cleanPath);
+
+    if (!fs.existsSync(fullPath)) {
+      return errorResponse(res, 'Image file missing from disk', 404);
+    }
+
+    return res.sendFile(fullPath);
+  } catch (error) {
+    console.error('[DOC_IMAGE] Error:', error);
+    return errorResponse(res, 'Failed to fetch document image: ' + error.message, 500);
+  }
+};
+
 module.exports = {
   createDocument,
   getDocuments,
@@ -250,4 +316,5 @@ module.exports = {
   updateDocument,
   deleteDocument,
   getExpiryReminders,
+  getDocumentImage,
 };

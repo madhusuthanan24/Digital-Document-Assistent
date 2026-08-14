@@ -36,8 +36,12 @@ model Document {
   issueDate     String?
   expiryDate    String?
 
-  imagePath     String?
-  mimeType      String?
+  fields        String?
+
+  imagePath          String?
+  croppedImagePath   String?
+  originalImagePath  String?
+  mimeType           String?
 
   createdAt     DateTime @default(now())
 

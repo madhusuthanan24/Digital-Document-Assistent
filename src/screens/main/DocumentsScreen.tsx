@@ -9,6 +9,8 @@ import {
   Platform,
   Alert,
   Modal,
+  Image,
+  ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { theme } from '../../constants/theme';
@@ -19,6 +21,7 @@ import { EmptyState } from '../../components/common/EmptyState';
 import { Button } from '../../components/common/Button';
 import { Input } from '../../components/common/Input';
 import { useAuth } from '../../context/AuthContext';
+import { pdfService } from '../../services/pdf/pdfService';
 
 export const DocumentsScreen: React.FC = () => {
   const { user } = useAuth();
@@ -38,6 +41,13 @@ export const DocumentsScreen: React.FC = () => {
   const [editExpiryDate, setEditExpiryDate] = useState<string>('');
   const [isSaving, setIsSaving] = useState<boolean>(false);
 
+  // PDF Action States
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState<boolean>(false);
+  const [isSharingPdf, setIsSharingPdf] = useState<boolean>(false);
+
+  // Image load error tracking
+  const [imageErrorMap, setImageErrorMap] = useState<Record<string, boolean>>({});
+
   const categories = [
     { label: 'All', value: 'ALL' },
     { label: 'Aadhaar', value: 'Aadhaar' },
@@ -55,6 +65,7 @@ export const DocumentsScreen: React.FC = () => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
+      console.log('[Vault] Loading document list');
       const data = await documentService.getDocuments(user.uid);
       setDocuments(data);
     } catch (err: any) {
@@ -71,10 +82,12 @@ export const DocumentsScreen: React.FC = () => {
   );
 
   const handleOpenDocDetails = (doc: DocumentMetadata) => {
+    console.log(`[Vault] Loading document: ${doc.documentName}`);
+    console.log(`[Vault] Loading document image: ${doc.id}`);
     setSelectedDoc(doc);
     setEditName(doc.documentName);
     setEditType(doc.documentType);
-    setEditNumber(doc.documentNumber);
+    setEditNumber(doc.documentNumber || '');
     setEditIssueDate(doc.issueDate || '');
     setEditExpiryDate(doc.expiryDate || '');
     setIsEditMode(false);
@@ -83,6 +96,35 @@ export const DocumentsScreen: React.FC = () => {
   const handleCloseModal = () => {
     setSelectedDoc(null);
     setIsEditMode(false);
+  };
+
+  const handleDownloadPdf = async (doc: DocumentMetadata) => {
+    setIsDownloadingPdf(true);
+    try {
+      const savedPath = await pdfService.downloadPdfToDevice(doc);
+      Alert.alert(
+        'PDF Saved Successfully',
+        `The document PDF has been downloaded and saved to your device!\n\nLocation: ${savedPath}`,
+        [{ text: 'OK' }]
+      );
+    } catch (err: any) {
+      Alert.alert('Unable to Generate PDF', err?.message || 'Could not download PDF.');
+    } finally {
+      setIsDownloadingPdf(false);
+    }
+  };
+
+  const handleSharePdf = async (doc: DocumentMetadata) => {
+    setIsSharingPdf(true);
+    try {
+      await pdfService.sharePdf(doc);
+    } catch (err: any) {
+      if (err?.message !== 'User cancelled') {
+        Alert.alert('Unable to Share PDF', err?.message || 'Could not share PDF.');
+      }
+    } finally {
+      setIsSharingPdf(false);
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -217,32 +259,54 @@ export const DocumentsScreen: React.FC = () => {
             }
           />
         ) : (
-          filteredDocs.map((doc) => (
-            <TouchableOpacity
-              key={doc.id}
-              style={styles.card}
-              activeOpacity={0.8}
-              onPress={() => handleOpenDocDetails(doc)}
-            >
-              <View style={styles.cardHeader}>
-                <View style={styles.categoryBadge}>
-                  <Text style={styles.categoryText}>{doc.documentType}</Text>
+          filteredDocs.map((doc) => {
+            const imageUrl = documentService.getDocumentImageUrl(doc.id, doc.imagePath, doc.localFileUri);
+            const hasError = imageErrorMap[doc.id];
+
+            return (
+              <TouchableOpacity
+                key={doc.id}
+                style={styles.card}
+                activeOpacity={0.8}
+                onPress={() => handleOpenDocDetails(doc)}
+              >
+                <View style={styles.cardHeader}>
+                  <View style={styles.categoryBadge}>
+                    <Text style={styles.categoryText}>{doc.documentType}</Text>
+                  </View>
+                  <Text style={styles.dateText}>
+                    {doc.issueDate ? `Issued: ${doc.issueDate}` : 'Secured'}
+                  </Text>
                 </View>
-                <Text style={styles.dateText}>
-                  {doc.issueDate ? `Issued: ${doc.issueDate}` : 'Secured'}
+                <Text style={styles.cardTitle}>{doc.documentName}</Text>
+                <Text style={styles.cardNumber}>
+                  {doc.documentNumber || (doc.fileName ? `File: ${doc.fileName}` : 'Saved in Vault')}
                 </Text>
-              </View>
-              <Text style={styles.cardTitle}>{doc.documentName}</Text>
-              <Text style={styles.cardNumber}>
-                {doc.documentNumber || (doc.fileName ? `File: ${doc.fileName}` : 'Saved in Vault')}
-              </Text>
-              {doc.expiryDate ? (
-                <Text style={styles.expiryText}>
-                  Expires: <Text style={styles.expiryDate}>{doc.expiryDate}</Text>
-                </Text>
-              ) : null}
-            </TouchableOpacity>
-          ))
+                {doc.expiryDate ? (
+                  <Text style={styles.expiryText}>
+                    Expires: <Text style={styles.expiryDate}>{doc.expiryDate}</Text>
+                  </Text>
+                ) : null}
+
+                {/* Cropped Document Image Preview in Card */}
+                {imageUrl && !hasError ? (
+                  <View style={styles.cardImageContainer}>
+                    <Image
+                      source={{
+                        uri: imageUrl,
+                        headers: user?.uid ? { 'x-user-id': user.uid } : undefined,
+                      }}
+                      style={styles.cardImage}
+                      resizeMode="cover"
+                      onError={() =>
+                        setImageErrorMap((prev) => ({ ...prev, [doc.id]: true }))
+                      }
+                    />
+                  </View>
+                ) : null}
+              </TouchableOpacity>
+            );
+          })
         )}
       </ScrollView>
 
@@ -269,6 +333,20 @@ export const DocumentsScreen: React.FC = () => {
                 {!isEditMode ? (
                   // Read-Only Detail View
                   <View>
+                    {/* Cropped Document Image Preview in Modal */}
+                    {documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri) ? (
+                      <View style={styles.modalImageWrapper}>
+                        <Image
+                          source={{
+                            uri: documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri),
+                            headers: user?.uid ? { 'x-user-id': user.uid } : undefined,
+                          }}
+                          style={styles.modalImage}
+                          resizeMode="contain"
+                        />
+                      </View>
+                    ) : null}
+
                     <View style={styles.detailRow}>
                       <Text style={styles.detailLabel}>Document Name</Text>
                       <Text style={styles.detailValue}>{selectedDoc.documentName}</Text>
@@ -279,55 +357,132 @@ export const DocumentsScreen: React.FC = () => {
                       <Text style={styles.detailValue}>{selectedDoc.documentType}</Text>
                     </View>
 
-                    <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Document Number</Text>
-                      <Text style={styles.detailValue}>
-                        {selectedDoc.documentNumber || 'N/A'}
-                      </Text>
-                    </View>
-
-                    <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Issue Date</Text>
-                      <Text style={styles.detailValue}>
-                        {selectedDoc.issueDate || 'Not specified'}
-                      </Text>
-                    </View>
-
-                    <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Expiry Date</Text>
-                      <Text style={styles.detailValue}>
-                        {selectedDoc.expiryDate || 'No expiry'}
-                      </Text>
-                    </View>
-
-                    {selectedDoc.fileName ? (
+                    {selectedDoc.documentNumber ? (
                       <View style={styles.detailRow}>
-                        <Text style={styles.detailLabel}>Attached File</Text>
-                        <Text style={styles.detailValue}>{selectedDoc.fileName}</Text>
+                        <Text style={styles.detailLabel}>Document Number</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.documentNumber}</Text>
                       </View>
                     ) : null}
 
-                    {selectedDoc.localFileUri ? (
+                    {selectedDoc.name ? (
                       <View style={styles.detailRow}>
-                        <Text style={styles.detailLabel}>Local URI</Text>
-                        <Text style={[styles.detailValue, { fontSize: 11 }]}>
-                          {selectedDoc.localFileUri}
-                        </Text>
+                        <Text style={styles.detailLabel}>Holder Name</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.name}</Text>
                       </View>
                     ) : null}
 
-                    <View style={styles.modalActions}>
+                    {selectedDoc.fatherName ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Father / Relative Name</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.fatherName}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.gender ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Gender</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.gender}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.dateOfBirth ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Date of Birth</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.dateOfBirth}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.address ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Address</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.address}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.issueDate ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Issue Date</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.issueDate}</Text>
+                      </View>
+                    ) : null}
+
+                    {selectedDoc.expiryDate ? (
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Expiry Date</Text>
+                        <Text style={styles.detailValue}>{selectedDoc.expiryDate}</Text>
+                      </View>
+                    ) : null}
+
+                    {/* Render all dynamic AI-extracted fields */}
+                    {selectedDoc.fields && typeof selectedDoc.fields === 'object'
+                      ? Object.entries(selectedDoc.fields).map(([key, val]) => {
+                          if (!val || typeof val !== 'string' || !val.trim()) return null;
+                          const formattedLabel = key
+                            .replace(/([A-Z])/g, ' $1')
+                            .replace(/_/g, ' ')
+                            .replace(/^\w/, c => c.toUpperCase())
+                            .trim();
+
+                          // Avoid repeating standard fields already shown above
+                          const lower = formattedLabel.toLowerCase();
+                          if (
+                            lower === 'document name' ||
+                            lower === 'document type' ||
+                            lower === 'type' ||
+                            lower === 'document number' ||
+                            lower === 'name' ||
+                            lower === 'holder name' ||
+                            lower === 'father name' ||
+                            lower === 'father / relative name' ||
+                            lower === 'gender' ||
+                            lower === 'date of birth' ||
+                            lower === 'address' ||
+                            lower === 'issue date' ||
+                            lower === 'expiry date'
+                          ) {
+                            return null;
+                          }
+
+                          return (
+                            <View key={key} style={styles.detailRow}>
+                              <Text style={styles.detailLabel}>{formattedLabel}</Text>
+                              <Text style={styles.detailValue}>{val.trim()}</Text>
+                            </View>
+                          );
+                        })
+                      : null}
+
+                    {/* PDF Actions */}
+                    <View style={styles.pdfActionsRow}>
+                      <Button
+                        title={isDownloadingPdf ? 'Saving...' : '📥 Download PDF'}
+                        onPress={() => handleDownloadPdf(selectedDoc)}
+                        isLoading={isDownloadingPdf}
+                        variant="primary"
+                        style={{ flex: 1, marginRight: 6 }}
+                      />
+                      <Button
+                        title={isSharingPdf ? 'Sharing...' : '📤 Share PDF'}
+                        onPress={() => handleSharePdf(selectedDoc)}
+                        isLoading={isSharingPdf}
+                        variant="outlined"
+                        style={{ flex: 1, marginLeft: 6 }}
+                      />
+                    </View>
+
+                    {/* Edit & Delete Actions */}
+                    <View style={styles.modalActionsRow}>
                       <Button
                         title="✏️ Edit Info"
                         onPress={() => setIsEditMode(true)}
-                        variant="primary"
-                        style={{ flex: 1, marginRight: 8 }}
+                        variant="outlined"
+                        style={{ flex: 1, marginRight: 6 }}
                       />
                       <Button
                         title="🗑️ Delete"
                         onPress={() => handleDeleteDoc(selectedDoc)}
                         variant="outlined"
-                        style={{ flex: 1, marginLeft: 8 }}
+                        style={{ flex: 1, marginLeft: 6 }}
                       />
                     </View>
                   </View>
@@ -380,19 +535,19 @@ export const DocumentsScreen: React.FC = () => {
                       placeholder="YYYY-MM-DD"
                     />
 
-                    <View style={styles.modalActions}>
+                    <View style={styles.modalActionsRow}>
                       <Button
                         title="Save Changes"
                         onPress={handleSaveEdit}
                         isLoading={isSaving}
                         variant="primary"
-                        style={{ flex: 1, marginRight: 8 }}
+                        style={{ flex: 1, marginRight: 6 }}
                       />
                       <Button
                         title="Cancel"
                         onPress={() => setIsEditMode(false)}
                         variant="outlined"
-                        style={{ flex: 1, marginLeft: 8 }}
+                        style={{ flex: 1, marginLeft: 6 }}
                       />
                     </View>
                   </View>
@@ -546,6 +701,36 @@ const styles = StyleSheet.create({
     color: theme.colors.warning,
   },
 
+  // Card & Modal Image Container
+  cardImageContainer: {
+    marginTop: theme.spacing.sm,
+    borderRadius: theme.radius.sm,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: '#0F172A',
+  },
+  cardImage: {
+    width: '100%',
+    height: 140,
+  },
+  modalImageWrapper: {
+    width: '100%',
+    height: 220,
+    backgroundColor: '#090D16',
+    borderRadius: theme.radius.md,
+    marginBottom: theme.spacing.md,
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  modalImage: {
+    width: '100%',
+    height: '100%',
+  },
+
   // Modal Styles
   modalOverlay: {
     flex: 1,
@@ -603,8 +788,13 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
     marginBottom: 6,
   },
-  modalActions: {
+  pdfActionsRow: {
     flexDirection: 'row',
     marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.xs,
+  },
+  modalActionsRow: {
+    flexDirection: 'row',
+    marginTop: theme.spacing.xs,
   },
 });

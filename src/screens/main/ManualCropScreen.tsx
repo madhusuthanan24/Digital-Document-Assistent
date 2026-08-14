@@ -1,15 +1,21 @@
 /**
  * ManualCropScreen.tsx
  *
- * Full-screen interactive manual crop overlay built with React Native PanResponders.
- * Features:
- *   - 4 independently draggable corner handles (TL, TR, BL, BR)
- *   - Move whole selection area by dragging inside the crop rect
- *   - Darkened overlay outside the crop rect
- *   - Aspect-fit contain offset & scaling coordinate conversion
- *   - 90° rotation support with dynamic container adaptation
- *   - Reset, Rotate, Cancel, "Use Selection"
- *   - expo-image-manipulator integration for final pixel crop
+ * Ground-up rewrite of Manual Crop Overlay (Adobe Scan Style)
+ *
+ * Features & Architecture:
+ *  1. Single Source of Truth: cropRect = { left, top, right, bottom } in display coordinates.
+ *  2. Deferred Layout Measurement: Image container onLayout calculates contain-scale & offsets
+ *     before initializing cropRect (prevents 0-width collapse).
+ *  3. 8 Independent Responders + 1 Body Drag Responder:
+ *     - 4 Corners (TL, TR, BL, BR): circular dots (20px)
+ *     - 4 Edges (TC, ML, MR, BC): rectangular tabs (32x8 / 8x32)
+ *     - Large 48px touch targets centered on handles.
+ *     - Single-snapshot anti-jitter calculation relative to grant state.
+ *     - Strict clamping within image display bounds and 80dp minimum size.
+ *  4. 4 Segmented Dim Overlay Strips with pointerEvents="none" to prevent touch swallowed events.
+ *  5. Real-Time On-Screen Debug HUD showing live crop bounds & active handle logs.
+ *  6. Coordinate Conversion & Pixel-Accurate Crop via @react-native-community/image-editor.
  */
 
 import React, { useRef, useState, useCallback, useEffect } from 'react';
@@ -25,7 +31,7 @@ import {
   Modal,
   LayoutChangeEvent,
 } from 'react-native';
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import ImageEditor from '@react-native-community/image-editor';
 import { theme } from '../../constants/theme';
 
 export interface ManualCropResult {
@@ -43,15 +49,16 @@ export interface ManualCropScreenProps {
   onCancel: () => void;
 }
 
-const HANDLE_SIZE = 32;
-const MIN_CROP_SIZE = 40;
-
-interface Rect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+export interface CropRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
+
+const HANDLE_TOUCH_SIZE = 48;
+const CORNER_VISUAL_SIZE = 20;
+const MIN_CROP_SIZE = 80;
 
 export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
   visible,
@@ -65,211 +72,429 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
     width: 0,
     height: 0,
   });
+  const [measuredSize, setMeasuredSize] = useState<{ width: number; height: number }>({
+    width: imageWidth || 0,
+    height: imageHeight || 0,
+  });
+
   const [rotation, setRotation] = useState<number>(0);
   const [isCropping, setIsCropping] = useState<boolean>(false);
+  const [lastTouchedHandle, setLastTouchedHandle] = useState<string>('None');
 
-  // Determine effective original image dimensions accounting for rotation
+  // Measure image dimensions if zero/missing
+  useEffect(() => {
+    if (imageUri) {
+      if (imageWidth > 0 && imageHeight > 0) {
+        setMeasuredSize({ width: imageWidth, height: imageHeight });
+      } else {
+        Image.getSize(
+          imageUri,
+          (w, h) => {
+            console.log(`[CropScreen] Image.getSize resolved: ${w}x${h}`);
+            setMeasuredSize({ width: w, height: h });
+          },
+          (err) => {
+            console.warn('[CropScreen] Image.getSize error:', err);
+          }
+        );
+      }
+    }
+  }, [imageUri, imageWidth, imageHeight]);
+
+  const rawImgW = measuredSize.width || 1000;
+  const rawImgH = measuredSize.height || 1000;
+
   const isRotated90 = rotation === 90 || rotation === 270;
-  const effImgW = isRotated90 ? imageHeight : imageWidth;
-  const effImgH = isRotated90 ? imageWidth : imageHeight;
+  const effImgW = isRotated90 ? rawImgH : rawImgW;
+  const effImgH = isRotated90 ? rawImgW : rawImgH;
 
-  // Calculate contain scale and offset
   const containerW = containerSize.width;
   const containerH = containerSize.height;
 
-  let scale = 1;
-  let displayW = containerW;
-  let displayH = containerH;
+  let displayW = 0;
+  let displayH = 0;
   let offsetX = 0;
   let offsetY = 0;
 
   if (containerW > 0 && containerH > 0 && effImgW > 0 && effImgH > 0) {
-    scale = Math.min(containerW / effImgW, containerH / effImgH);
+    const scale = Math.min(containerW / effImgW, containerH / effImgH);
     displayW = effImgW * scale;
     displayH = effImgH * scale;
     offsetX = (containerW - displayW) / 2;
     offsetY = (containerH - displayH) / 2;
   }
 
-  // Crop rect state in container coordinates
-  const [cropRect, setCropRect] = useState<Rect>({
-    x: offsetX,
-    y: offsetY,
-    width: displayW,
-    height: displayH,
-  });
+  // Ref layout snapshot for PanResponders
+  const layoutRef = useRef({ offsetX, offsetY, displayW, displayH });
+  layoutRef.current = { offsetX, offsetY, displayW, displayH };
 
-  const cropRectRef = useRef<Rect>(cropRect);
+  // Single Source of Truth for Crop Rectangle (Display Coordinates)
+  const [cropRect, setCropRect] = useState<CropRect | null>(null);
+
+  const cropRectRef = useRef<CropRect | null>(cropRect);
   cropRectRef.current = cropRect;
 
-  const startRectRef = useRef<Rect>(cropRect);
+  const startRectRef = useRef<CropRect>({ left: 0, top: 0, right: 0, bottom: 0 });
 
-  // Initialize or reset crop rect when image/rotation/container changes
-  const resetToFullImage = useCallback(() => {
-    if (containerW > 0 && containerH > 0 && effImgW > 0 && effImgH > 0) {
-      const s = Math.min(containerW / effImgW, containerH / effImgH);
-      const dW = effImgW * s;
-      const dH = effImgH * s;
-      const oX = (containerW - dW) / 2;
-      const oY = (containerH - dH) / 2;
-      const newRect = { x: oX, y: oY, width: dW, height: dH };
-      setCropRect(newRect);
-      cropRectRef.current = newRect;
-    }
-  }, [containerW, containerH, effImgW, effImgH]);
-
+  // Initialize crop box once layout is ready (~90% centered box)
   useEffect(() => {
-    resetToFullImage();
-  }, [resetToFullImage, rotation, imageUri]);
+    if (displayW > 0 && displayH > 0) {
+      const marginX = displayW * 0.05;
+      const marginY = displayH * 0.05;
 
-  // Container layout handler
+      const initialRect: CropRect = {
+        left: Math.round(offsetX + marginX),
+        top: Math.round(offsetY + marginY),
+        right: Math.round(offsetX + displayW - marginX),
+        bottom: Math.round(offsetY + displayH - marginY),
+      };
+
+      setCropRect(initialRect);
+      cropRectRef.current = initialRect;
+    }
+  }, [containerW, containerH, displayW, displayH, rotation, imageUri]);
+
   const handleContainerLayout = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     setContainerSize({ width, height });
   };
 
+  const resetToFullImage = useCallback(() => {
+    const { offsetX: ox, offsetY: oy, displayW: dW, displayH: dH } = layoutRef.current;
+    if (dW > 0 && dH > 0) {
+      const fullRect: CropRect = {
+        left: ox,
+        top: oy,
+        right: ox + dW,
+        bottom: oy + dH,
+      };
+      setCropRect(fullRect);
+      cropRectRef.current = fullRect;
+      setLastTouchedHandle('Reset Full');
+    }
+  }, []);
+
+  // Helper helper to clamp crop updates
+  const clampRect = (left: number, top: number, right: number, bottom: number): CropRect => {
+    const { offsetX: minX, offsetY: minY, displayW: dW, displayH: dH } = layoutRef.current;
+    const maxX = minX + dW;
+    const maxY = minY + dH;
+
+    let cLeft = Math.max(minX, Math.min(left, maxX - MIN_CROP_SIZE));
+    let cTop = Math.max(minY, Math.min(top, maxY - MIN_CROP_SIZE));
+    let cRight = Math.min(maxX, Math.max(right, cLeft + MIN_CROP_SIZE));
+    let cBottom = Math.min(maxY, Math.max(bottom, cTop + MIN_CROP_SIZE));
+
+    return { left: cLeft, top: cTop, right: cRight, bottom: cBottom };
+  };
+
   // -------------------------------------------------------------------------
-  // PanResponders for corner handles & body move
+  // 8 Independent Responders + 1 Body Drag Responder (Capture Phase Enabled)
   // -------------------------------------------------------------------------
-  const makeCornerPanResponder = (corner: 'tl' | 'tr' | 'bl' | 'br') =>
+
+  // 1. Top-Left Corner (TL) -> Moves left & top
+  const tlPan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
       onPanResponderGrant: () => {
-        startRectRef.current = { ...cropRectRef.current };
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Top-Left Corner');
+        console.log('[CropTouch] Top-Left Corner Grant');
       },
       onPanResponderMove: (_, gs) => {
-        const start = startRectRef.current;
-        const dx = gs.dx;
-        const dy = gs.dy;
-        const minX = offsetX;
-        const minY = offsetY;
-        const maxX = offsetX + displayW;
-        const maxY = offsetY + displayH;
-
-        let nextX = start.x;
-        let nextY = start.y;
-        let nextW = start.width;
-        let nextH = start.height;
-
-        if (corner === 'tl') {
-          const rawX = Math.min(Math.max(minX, start.x + dx), start.x + start.width - MIN_CROP_SIZE);
-          const rawY = Math.min(Math.max(minY, start.y + dy), start.y + start.height - MIN_CROP_SIZE);
-          nextW = start.x + start.width - rawX;
-          nextH = start.y + start.height - rawY;
-          nextX = rawX;
-          nextY = rawY;
-        } else if (corner === 'tr') {
-          const rawY = Math.min(Math.max(minY, start.y + dy), start.y + start.height - MIN_CROP_SIZE);
-          const rawW = Math.min(Math.max(MIN_CROP_SIZE, start.width + dx), maxX - start.x);
-          nextH = start.y + start.height - rawY;
-          nextY = rawY;
-          nextW = rawW;
-        } else if (corner === 'bl') {
-          const rawX = Math.min(Math.max(minX, start.x + dx), start.x + start.width - MIN_CROP_SIZE);
-          const rawH = Math.min(Math.max(MIN_CROP_SIZE, start.height + dy), maxY - start.y);
-          nextW = start.x + start.width - rawX;
-          nextX = rawX;
-          nextH = rawH;
-        } else if (corner === 'br') {
-          nextW = Math.min(Math.max(MIN_CROP_SIZE, start.width + dx), maxX - start.x);
-          nextH = Math.min(Math.max(MIN_CROP_SIZE, start.height + dy), maxY - start.y);
-        }
-
-        setCropRect({ x: nextX, y: nextY, width: nextW, height: nextH });
+        const s = startRectRef.current;
+        const newLeft = s.left + gs.dx;
+        const newTop = s.top + gs.dy;
+        const updated = clampRect(newLeft, newTop, s.right, s.bottom);
+        setCropRect(updated);
       },
-    });
+    }),
+  ).current;
 
-  const bodyPanResponder = PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: () => {
-      startRectRef.current = { ...cropRectRef.current };
-    },
-    onPanResponderMove: (_, gs) => {
-      const start = startRectRef.current;
-      const minX = offsetX;
-      const minY = offsetY;
-      const maxX = offsetX + displayW - start.width;
-      const maxY = offsetY + displayH - start.height;
+  // 2. Top-Center Edge (TC) -> Moves top only
+  const tcPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Top Edge');
+        console.log('[CropTouch] Top Edge Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const s = startRectRef.current;
+        const newTop = s.top + gs.dy;
+        const updated = clampRect(s.left, newTop, s.right, s.bottom);
+        setCropRect(updated);
+      },
+    }),
+  ).current;
 
-      const nextX = Math.min(Math.max(minX, start.x + gs.dx), maxX);
-      const nextY = Math.min(Math.max(minY, start.y + gs.dy), maxY);
+  // 3. Top-Right Corner (TR) -> Moves right & top
+  const trPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Top-Right Corner');
+        console.log('[CropTouch] Top-Right Corner Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const s = startRectRef.current;
+        const newRight = s.right + gs.dx;
+        const newTop = s.top + gs.dy;
+        const updated = clampRect(s.left, newTop, newRight, s.bottom);
+        setCropRect(updated);
+      },
+    }),
+  ).current;
 
-      setCropRect({ ...start, x: nextX, y: nextY });
-    },
-  });
+  // 4. Middle-Left Edge (ML) -> Moves left only
+  const mlPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Left Edge');
+        console.log('[CropTouch] Left Edge Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const s = startRectRef.current;
+        const newLeft = s.left + gs.dx;
+        const updated = clampRect(newLeft, s.top, s.right, s.bottom);
+        setCropRect(updated);
+      },
+    }),
+  ).current;
 
-  const tlPan = useRef(makeCornerPanResponder('tl')).current;
-  const trPan = useRef(makeCornerPanResponder('tr')).current;
-  const blPan = useRef(makeCornerPanResponder('bl')).current;
-  const brPan = useRef(makeCornerPanResponder('br')).current;
-  const bodyDrag = useRef(bodyPanResponder).current;
+  // 5. Middle-Right Edge (MR) -> Moves right only
+  const mrPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Right Edge');
+        console.log('[CropTouch] Right Edge Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const s = startRectRef.current;
+        const newRight = s.right + gs.dx;
+        const updated = clampRect(s.left, s.top, newRight, s.bottom);
+        setCropRect(updated);
+      },
+    }),
+  ).current;
 
-  // Rotate handler
+  // 6. Bottom-Left Corner (BL) -> Moves left & bottom
+  const blPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Bottom-Left Corner');
+        console.log('[CropTouch] Bottom-Left Corner Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const s = startRectRef.current;
+        const newLeft = s.left + gs.dx;
+        const newBottom = s.bottom + gs.dy;
+        const updated = clampRect(newLeft, s.top, s.right, newBottom);
+        setCropRect(updated);
+      },
+    }),
+  ).current;
+
+  // 7. Bottom-Center Edge (BC) -> Moves bottom only
+  const bcPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Bottom Edge');
+        console.log('[CropTouch] Bottom Edge Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const s = startRectRef.current;
+        const newBottom = s.bottom + gs.dy;
+        const updated = clampRect(s.left, s.top, s.right, newBottom);
+        setCropRect(updated);
+      },
+    }),
+  ).current;
+
+  // 8. Bottom-Right Corner (BR) -> Moves right & bottom
+  const brPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Bottom-Right Corner');
+        console.log('[CropTouch] Bottom-Right Corner Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const s = startRectRef.current;
+        const newRight = s.right + gs.dx;
+        const newBottom = s.bottom + gs.dy;
+        const updated = clampRect(s.left, s.top, newRight, newBottom);
+        setCropRect(updated);
+      },
+    }),
+  ).current;
+
+  // 9. Inside Body Drag -> Moves all 4 edges together
+  const bodyPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: () => {
+        if (cropRectRef.current) startRectRef.current = { ...cropRectRef.current };
+        setLastTouchedHandle('Body Drag');
+        console.log('[CropTouch] Body Drag Grant');
+      },
+      onPanResponderMove: (_, gs) => {
+        const { offsetX: minX, offsetY: minY, displayW: dW, displayH: dH } = layoutRef.current;
+        const s = startRectRef.current;
+        const width = s.right - s.left;
+        const height = s.bottom - s.top;
+
+        const maxX = minX + dW - width;
+        const maxY = minY + dH - height;
+
+        const newLeft = Math.min(Math.max(minX, s.left + gs.dx), maxX);
+        const newTop = Math.min(Math.max(minY, s.top + gs.dy), maxY);
+
+        setCropRect({
+          left: newLeft,
+          top: newTop,
+          right: newLeft + width,
+          bottom: newTop + height,
+        });
+      },
+    }),
+  ).current;
+
   const handleRotate = () => {
     setRotation(r => (r + 90) % 360);
   };
 
-  // -------------------------------------------------------------------------
-  // Pixel coordinate conversion & crop execution
-  // -------------------------------------------------------------------------
+  // Crop execution
   const handleUseSelection = async () => {
-    if (!imageUri || displayW <= 0 || displayH <= 0) return;
+    if (!imageUri || !cropRect || displayW <= 0 || displayH <= 0) return;
     setIsCropping(true);
 
     try {
-      const current = cropRectRef.current;
+      const current = cropRectRef.current || cropRect;
+      const { offsetX: ox, offsetY: oy, displayW: dW, displayH: dH } = layoutRef.current;
 
-      // 1. Calculate selection relative to displayed image inside container
-      const relX = Math.max(0, current.x - offsetX);
-      const relY = Math.max(0, current.y - offsetY);
-      const relW = Math.min(displayW - relX, current.width);
-      const relH = Math.min(displayH - relY, current.height);
+      const cropDisplayX = Math.max(0, current.left - ox);
+      const cropDisplayY = Math.max(0, current.top - oy);
+      const cropDisplayW = Math.min(dW - cropDisplayX, current.right - current.left);
+      const cropDisplayH = Math.min(dH - cropDisplayY, current.bottom - current.top);
 
-      // 2. Convert display coordinates to image pixel coordinates
-      const scaleX = effImgW / displayW;
-      const scaleY = effImgH / displayH;
+      const scaleX = effImgW / dW;
+      const scaleY = effImgH / dH;
 
-      const pixelX = Math.max(0, Math.round(relX * scaleX));
-      const pixelY = Math.max(0, Math.round(relY * scaleY));
-      const pixelW = Math.max(1, Math.min(Math.round(relW * scaleX), effImgW - pixelX));
-      const pixelH = Math.max(1, Math.min(Math.round(relH * scaleY), effImgH - pixelY));
+      const pixelX = Math.max(0, Math.round(cropDisplayX * scaleX));
+      const pixelY = Math.max(0, Math.round(cropDisplayY * scaleY));
+      const pixelW = Math.max(1, Math.min(Math.round(cropDisplayW * scaleX), effImgW - pixelX));
+      const pixelH = Math.max(1, Math.min(Math.round(cropDisplayH * scaleY), effImgH - pixelY));
 
-      console.log(`[CropScreen] Container: ${containerW}x${containerH}, Offset: (${offsetX.toFixed(1)}, ${offsetY.toFixed(1)})`);
-      console.log(`[CropScreen] Display image: ${displayW.toFixed(1)}x${displayH.toFixed(1)}, Eff image: ${effImgW}x${effImgH}`);
-      console.log(`[CropScreen] Display rect: x=${current.x.toFixed(1)}, y=${current.y.toFixed(1)}, w=${current.width.toFixed(1)}, h=${current.height.toFixed(1)}`);
-      console.log(`[CropScreen] Pixel crop: originX=${pixelX}, originY=${pixelY}, width=${pixelW}, height=${pixelH}, rotation=${rotation}`);
+      let origX: number;
+      let origY: number;
+      let origW: number;
+      let origH: number;
 
-      // 3. Execute pixel crop with expo-image-manipulator
-      const actions: any[] = [];
-
-      if (rotation > 0) {
-        actions.push({ rotate: rotation });
+      switch (rotation) {
+        case 90:
+          origX = pixelY;
+          origY = rawImgH - pixelX - pixelW;
+          origW = pixelH;
+          origH = pixelW;
+          break;
+        case 180:
+          origX = rawImgW - pixelX - pixelW;
+          origY = rawImgH - pixelY - pixelH;
+          origW = pixelW;
+          origH = pixelH;
+          break;
+        case 270:
+          origX = rawImgW - pixelY - pixelH;
+          origY = pixelX;
+          origW = pixelH;
+          origH = pixelW;
+          break;
+        default:
+          origX = pixelX;
+          origY = pixelY;
+          origW = pixelW;
+          origH = pixelH;
       }
 
-      actions.push({
-        crop: {
-          originX: pixelX,
-          originY: pixelY,
-          width: pixelW,
-          height: pixelH,
-        },
+      origX = Math.max(0, Math.min(origX, rawImgW - 1));
+      origY = Math.max(0, Math.min(origY, rawImgH - 1));
+      origW = Math.max(1, Math.min(origW, rawImgW - origX));
+      origH = Math.max(1, Math.min(origH, rawImgH - origY));
+
+      console.log(`[Crop] Original URI: ${imageUri}`);
+      console.log(`[Crop] Original dimensions: ${rawImgW}x${rawImgH}`);
+      console.log(`[Crop] Display dimensions: ${dW.toFixed(1)}x${dH.toFixed(1)}`);
+      console.log(`[Crop] Crop display rect: left=${current.left.toFixed(1)}, top=${current.top.toFixed(1)}, right=${current.right.toFixed(1)}, bottom=${current.bottom.toFixed(1)}`);
+      console.log(`[Crop] Crop original rect: origX=${origX}, origY=${origY}, origW=${origW}, origH=${origH}`);
+
+      const cropResult = await ImageEditor.cropImage(imageUri, {
+        offset: { x: origX, y: origY },
+        size: { width: origW, height: origH },
+        quality: 0.92,
+        format: 'jpeg',
       });
 
-      const manipResult = await manipulateAsync(imageUri, actions, {
-        compress: 0.9,
-        format: SaveFormat.JPEG,
-      });
+      let finalSavedUri = cropResult.uri;
+      try {
+        const RNFS = require('react-native-fs');
+        const timestamp = Date.now();
+        const destPath = `${RNFS.CachesDirectoryPath}/cropped_${timestamp}.jpg`;
+        const cleanSourcePath = cropResult.uri.replace('file://', '');
+        await RNFS.copyFile(cleanSourcePath, destPath);
+        finalSavedUri = `file://${destPath}`;
+      } catch (copyErr) {
+        console.warn('[Crop] Copy to persistent file skipped:', copyErr);
+      }
+
+      console.log(`[Crop] Cropped image URI: ${finalSavedUri}`);
 
       onCrop({
-        uri: manipResult.uri,
-        width: manipResult.width || pixelW,
-        height: manipResult.height || pixelH,
+        uri: finalSavedUri,
+        width: cropResult.width || origW,
+        height: cropResult.height || origH,
       });
     } catch (err: any) {
-      console.error('[CropScreen] Crop error:', err);
-      Alert.alert('Crop Error', err?.message || 'Could not crop the selected area. Please try again.');
+      console.error('[Crop] Error executing crop:', err);
+      Alert.alert('Crop Error', err?.message || 'Could not crop the selection.');
     } finally {
       setIsCropping(false);
     }
@@ -277,7 +502,10 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
 
   if (!visible) return null;
 
-  const { x: cx, y: cy, width: cw, height: ch } = cropRect;
+  const isLayoutReady = containerW > 0 && containerH > 0 && displayW > 0 && displayH > 0 && cropRect !== null;
+  const c = cropRect || { left: 0, top: 0, right: 0, bottom: 0 };
+  const cropW = c.right - c.left;
+  const cropH = c.bottom - c.top;
 
   return (
     <Modal visible={visible} animationType="slide" transparent={false} onRequestClose={onCancel}>
@@ -287,17 +515,24 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
           <TouchableOpacity style={styles.headerBtn} onPress={onCancel}>
             <Text style={styles.headerBtnText}>✕ Cancel</Text>
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Manual Crop</Text>
+          <Text style={styles.headerTitle}>Manual Crop v2 (HUD Active)</Text>
           <TouchableOpacity style={styles.headerBtn} onPress={handleRotate}>
             <Text style={styles.headerBtnText}>↻ Rotate ({rotation}°)</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Interactive Canvas Area */}
+        {/* Temporary Unmistakable Build Marker Banner */}
+        <View style={{ backgroundColor: '#F59E0B', paddingVertical: 4, alignItems: 'center' }}>
+          <Text style={{ color: '#000', fontSize: 12, fontWeight: '800' }}>
+            ⚡ LIVE BUILD MARKER: GROUND-UP REWRITE V2 (DEBUG HUD ACTIVE) ⚡
+          </Text>
+        </View>
+
+        {/* Canvas Area */}
         <View style={styles.canvasContainer} onLayout={handleContainerLayout}>
-          {containerW > 0 && containerH > 0 ? (
+          {isLayoutReady ? (
             <>
-              {/* Main Image */}
+              {/* Main Displayed Image */}
               <Image
                 source={{ uri: imageUri }}
                 style={[
@@ -313,59 +548,92 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
                 resizeMode="stretch"
               />
 
-              {/* 4 Dim Overlay Strips */}
-              {/* Top */}
-              <View style={[styles.dim, { left: 0, top: 0, right: 0, height: Math.max(0, cy) }]} />
-              {/* Bottom */}
-              <View style={[styles.dim, { left: 0, top: cy + ch, right: 0, bottom: 0 }]} />
-              {/* Left */}
-              <View style={[styles.dim, { left: 0, top: cy, width: Math.max(0, cx), height: ch }]} />
-              {/* Right */}
-              <View style={[styles.dim, { left: cx + cw, top: cy, right: 0, height: ch }]} />
+              {/* 4 Segmented Dim Overlay Strips (pointerEvents="none") */}
+              <View pointerEvents="none" style={[styles.dim, { left: 0, top: 0, right: 0, height: Math.max(0, c.top) }]} />
+              <View pointerEvents="none" style={[styles.dim, { left: 0, top: c.bottom, right: 0, bottom: 0 }]} />
+              <View pointerEvents="none" style={[styles.dim, { left: 0, top: c.top, width: Math.max(0, c.left), height: cropH }]} />
+              <View pointerEvents="none" style={[styles.dim, { left: c.right, top: c.top, right: 0, height: cropH }]} />
 
-              {/* Active Crop Rectangle Body */}
+              {/* Active Crop Border & Move-Whole-Box Body Drag */}
               <View
-                style={[styles.cropBorder, { left: cx, top: cy, width: cw, height: ch }]}
-                {...bodyDrag.panHandlers}
-              >
-                {/* Rule of Thirds Grid Lines */}
-                <View style={[styles.gridLine, styles.gridH1]} />
-                <View style={[styles.gridLine, styles.gridH2]} />
-                <View style={[styles.gridLine, styles.gridV1]} />
-                <View style={[styles.gridLine, styles.gridV2]} />
+                style={[styles.cropBorder, { left: c.left, top: c.top, width: cropW, height: cropH }]}
+                {...bodyPan.panHandlers}
+              />
+
+              {/* Real-time Debug HUD */}
+              <View pointerEvents="none" style={styles.debugHud}>
+                <Text style={styles.debugHudText}>
+                  RECT: L:{Math.round(c.left)} T:{Math.round(c.top)} R:{Math.round(c.right)} B:{Math.round(c.bottom)} ({Math.round(cropW)}x{Math.round(cropH)})
+                </Text>
+                <Text style={styles.debugHudTextSub}>
+                  ACTIVE: {lastTouchedHandle}
+                </Text>
               </View>
 
-              {/* 4 Draggable Corner Handles */}
-              {/* Top-Left */}
+              {/* ── 8 ADOBE SCAN TOUCH HANDLES ── */}
+
+              {/* 1. Top-Left Corner (TL) */}
               <View
-                style={[styles.handle, { left: cx - HANDLE_SIZE / 2, top: cy - HANDLE_SIZE / 2 }]}
+                style={[styles.handleTouchArea, { left: c.left - HANDLE_TOUCH_SIZE / 2, top: c.top - HANDLE_TOUCH_SIZE / 2 }]}
                 {...tlPan.panHandlers}
               >
-                <View style={[styles.handleCorner, styles.cornerTL]} />
+                <View style={styles.cornerHandleDot} />
               </View>
 
-              {/* Top-Right */}
+              {/* 2. Top-Center Edge Tab (TC) */}
               <View
-                style={[styles.handle, { left: cx + cw - HANDLE_SIZE / 2, top: cy - HANDLE_SIZE / 2 }]}
+                style={[styles.handleTouchArea, { left: c.left + cropW / 2 - HANDLE_TOUCH_SIZE / 2, top: c.top - HANDLE_TOUCH_SIZE / 2 }]}
+                {...tcPan.panHandlers}
+              >
+                <View style={styles.edgeTabHorizontal} />
+              </View>
+
+              {/* 3. Top-Right Corner (TR) */}
+              <View
+                style={[styles.handleTouchArea, { left: c.right - HANDLE_TOUCH_SIZE / 2, top: c.top - HANDLE_TOUCH_SIZE / 2 }]}
                 {...trPan.panHandlers}
               >
-                <View style={[styles.handleCorner, styles.cornerTR]} />
+                <View style={styles.cornerHandleDot} />
               </View>
 
-              {/* Bottom-Left */}
+              {/* 4. Middle-Left Edge Tab (ML) */}
               <View
-                style={[styles.handle, { left: cx - HANDLE_SIZE / 2, top: cy + ch - HANDLE_SIZE / 2 }]}
+                style={[styles.handleTouchArea, { left: c.left - HANDLE_TOUCH_SIZE / 2, top: c.top + cropH / 2 - HANDLE_TOUCH_SIZE / 2 }]}
+                {...mlPan.panHandlers}
+              >
+                <View style={styles.edgeTabVertical} />
+              </View>
+
+              {/* 5. Middle-Right Edge Tab (MR) */}
+              <View
+                style={[styles.handleTouchArea, { left: c.right - HANDLE_TOUCH_SIZE / 2, top: c.top + cropH / 2 - HANDLE_TOUCH_SIZE / 2 }]}
+                {...mrPan.panHandlers}
+              >
+                <View style={styles.edgeTabVertical} />
+              </View>
+
+              {/* 6. Bottom-Left Corner (BL) */}
+              <View
+                style={[styles.handleTouchArea, { left: c.left - HANDLE_TOUCH_SIZE / 2, top: c.bottom - HANDLE_TOUCH_SIZE / 2 }]}
                 {...blPan.panHandlers}
               >
-                <View style={[styles.handleCorner, styles.cornerBL]} />
+                <View style={styles.cornerHandleDot} />
               </View>
 
-              {/* Bottom-Right */}
+              {/* 7. Bottom-Center Edge Tab (BC) */}
               <View
-                style={[styles.handle, { left: cx + cw - HANDLE_SIZE / 2, top: cy + ch - HANDLE_SIZE / 2 }]}
+                style={[styles.handleTouchArea, { left: c.left + cropW / 2 - HANDLE_TOUCH_SIZE / 2, top: c.bottom - HANDLE_TOUCH_SIZE / 2 }]}
+                {...bcPan.panHandlers}
+              >
+                <View style={styles.edgeTabHorizontal} />
+              </View>
+
+              {/* 8. Bottom-Right Corner (BR) */}
+              <View
+                style={[styles.handleTouchArea, { left: c.right - HANDLE_TOUCH_SIZE / 2, top: c.bottom - HANDLE_TOUCH_SIZE / 2 }]}
                 {...brPan.panHandlers}
               >
-                <View style={[styles.handleCorner, styles.cornerBR]} />
+                <View style={styles.cornerHandleDot} />
               </View>
             </>
           ) : (
@@ -373,7 +641,7 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
           )}
         </View>
 
-        {/* Footer */}
+        {/* Footer Controls */}
         <View style={styles.footer}>
           <TouchableOpacity style={styles.footerSecondaryBtn} onPress={resetToFullImage}>
             <Text style={styles.footerSecondaryText}>↺ Reset</Text>
@@ -444,46 +712,82 @@ const styles = StyleSheet.create({
   cropBorder: {
     position: 'absolute',
     borderWidth: 2,
-    borderColor: '#FFFFFF',
-    backgroundColor: 'transparent',
-  },
-  gridLine: {
-    position: 'absolute',
-    backgroundColor: 'rgba(255, 255, 255, 0.35)',
-  },
-  gridH1: { left: 0, right: 0, top: '33.33%', height: 1 },
-  gridH2: { left: 0, right: 0, top: '66.66%', height: 1 },
-  gridV1: { top: 0, bottom: 0, left: '33.33%', width: 1 },
-  gridV2: { top: 0, bottom: 0, left: '66.66%', width: 1 },
-  handle: {
-    position: 'absolute',
-    width: HANDLE_SIZE,
-    height: HANDLE_SIZE,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 99,
-  },
-  handleCorner: {
-    width: 20,
-    height: 20,
     borderColor: '#2563EB',
     backgroundColor: 'transparent',
+    zIndex: 90,
   },
-  cornerTL: {
-    borderTopWidth: 4,
-    borderLeftWidth: 4,
+  debugHud: {
+    position: 'absolute',
+    top: 12,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(17, 24, 39, 0.85)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#374151',
+    alignItems: 'center',
+    zIndex: 110,
   },
-  cornerTR: {
-    borderTopWidth: 4,
-    borderRightWidth: 4,
+  debugHudText: {
+    color: '#60A5FA',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: 'monospace',
   },
-  cornerBL: {
-    borderBottomWidth: 4,
-    borderLeftWidth: 4,
+  debugHudTextSub: {
+    color: '#10B981',
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 2,
   },
-  cornerBR: {
-    borderBottomWidth: 4,
-    borderRightWidth: 4,
+  handleTouchArea: {
+    position: 'absolute',
+    width: HANDLE_TOUCH_SIZE,
+    height: HANDLE_TOUCH_SIZE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+    elevation: 20,
+  },
+  cornerHandleDot: {
+    width: CORNER_VISUAL_SIZE,
+    height: CORNER_VISUAL_SIZE,
+    borderRadius: CORNER_VISUAL_SIZE / 2,
+    backgroundColor: '#2563EB',
+    borderWidth: 2.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  edgeTabHorizontal: {
+    width: 32,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#2563EB',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  edgeTabVertical: {
+    width: 8,
+    height: 32,
+    borderRadius: 4,
+    backgroundColor: '#2563EB',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 3,
   },
   footer: {
     height: 80,
