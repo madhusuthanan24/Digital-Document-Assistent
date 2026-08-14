@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "328841148237",
+    "project_id": "digitaldocumentassistant",
+    "storage_bucket": "digitaldocumentassistant.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:328841148237:android:caf3cc80304a65324ce904",
+        "android_client_info": {
+          "package_name": "com.digitaldocumentassistant"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAnIcgJAaVl-4AJlpq07D9Gd0A0BoF_rDA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "DDA-WebPreview",
+    "slug": "DDA-WebPreview",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {},
+    "android": {},
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-camera",
+      "expo-document-picker",
+      "expo-image-picker",
+      "expo-font",
+      "expo-web-browser"
+    ]
+  }
+}

@@ -1,0 +1,57 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String     @id @default(cuid())
+  name       String
+  email      String     @unique
+  password   String
+  createdAt  DateTime   @default(now())
+
+  documents  Document[]
+  reminders  Reminder[]
+}
+
+model Document {
+  id            String   @id @default(cuid())
+  userId        String
+
+  documentType  String
+  documentName  String
+
+  documentNumber String?
+
+  name          String?
+  fatherName    String?
+  gender        String?
+  address       String?
+
+  dateOfBirth   String?
+  issueDate     String?
+  expiryDate    String?
+
+  imagePath     String?
+  mimeType      String?
+
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Reminder {
+  id          String   @id @default(cuid())
+  userId      String
+
+  title       String
+  reminderDate DateTime
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
