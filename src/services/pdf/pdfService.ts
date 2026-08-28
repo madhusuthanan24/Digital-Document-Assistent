@@ -11,7 +11,7 @@ import { DocumentMetadata } from '../../types/document';
 import { documentService } from '../document/documentService';
 
 // Helper to convert local file:// or HTTP image URI to Base64 Data URL for HTML embedding
-async function getImageAsBase64(imageUri: string, headers?: Record<string, string>): Promise<string | null> {
+async function getImageAsBase64(imageUri: string, headers?: Record<string, string>, mimeType?: string): Promise<string | null> {
   console.log(`[PDF Log 1] Converting image to Base64 Data URL: ${imageUri}`);
   try {
     if (imageUri.startsWith('file://')) {
@@ -24,7 +24,8 @@ async function getImageAsBase64(imageUri: string, headers?: Record<string, strin
       }
       const b64 = await RNFS.readFile(cleanPath, 'base64');
       console.log('[PDF Log 1.2] Local image successfully converted to Base64');
-      return `data:image/jpeg;base64,${b64}`;
+      const mime = mimeType || 'image/jpeg';
+      return `data:${mime};base64,${b64}`;
     }
 
     const resp = await fetch(imageUri, { headers });
@@ -114,14 +115,14 @@ class PdfService {
   public async generateDocumentPdf(doc: DocumentMetadata): Promise<string> {
     console.log(`[PDF Log 2] Starting PDF generation for document: ${doc.documentName} (ID: ${doc.id})`);
 
-    // Prioritize cropped image path over raw original image
+    // Prioritize cropped image path stored in PostgreSQL
     const imageUri = doc.croppedImagePath || doc.imagePath || doc.localFileUri;
     const imageUrl = imageUri ? documentService.getDocumentImageUrl(doc.id, doc.imagePath, doc.localFileUri, doc.croppedImagePath) : null;
 
     console.log(`[PDF Log 2.1] Resolved Cropped Image Target: ${imageUrl || 'None'}`);
 
     const base64Image = imageUrl
-      ? await getImageAsBase64(imageUrl, doc.userId ? { 'x-user-id': doc.userId } : undefined)
+      ? await getImageAsBase64(imageUrl, doc.userId ? { 'x-user-id': doc.userId } : undefined, doc.mimeType)
       : null;
 
     const dynamicTableRows = this.buildDynamicRows(doc);
