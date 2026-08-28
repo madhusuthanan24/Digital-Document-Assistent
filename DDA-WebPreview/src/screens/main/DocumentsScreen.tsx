@@ -387,7 +387,7 @@ export const DocumentsScreen: React.FC = () => {
 
   const handleShareImage = async () => {
     if (!selectedDoc) return;
-    const imageSource = selectedDoc.fileUrl || selectedDoc.localFileUri;
+    const imageSource = selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri;
     if (!imageSource) {
       Alert.alert('No Image', 'No image file is attached to this document.');
       return;
@@ -625,16 +625,16 @@ export const DocumentsScreen: React.FC = () => {
                       </View>
                     ) : null}
 
-                    {/* Original Document Image Preview */}
-                    {(selectedDoc.fileUrl || selectedDoc.localFileUri) ? (
+                    {/* Cropped Document Image Preview */}
+                    {(selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri) ? (
                       <View style={styles.imagePreviewSection}>
                         <Text style={styles.fieldsSectionTitle}>Document Image</Text>
                         <TouchableOpacity
                           activeOpacity={0.9}
-                          onPress={() => setPreviewImageUri(selectedDoc.fileUrl || selectedDoc.localFileUri || null)}
+                          onPress={() => setPreviewImageUri(selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri || null)}
                         >
                           <Image
-                            source={{ uri: selectedDoc.fileUrl || selectedDoc.localFileUri }}
+                            source={{ uri: selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri }}
                             style={styles.docPreviewImage}
                             resizeMode="cover"
                           />

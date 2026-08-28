@@ -260,7 +260,7 @@ export const DocumentsScreen: React.FC = () => {
           />
         ) : (
           filteredDocs.map((doc) => {
-            const imageUrl = documentService.getDocumentImageUrl(doc.id, doc.imagePath, doc.localFileUri);
+            const imageUrl = documentService.getDocumentImageUrl(doc.id, doc.imagePath, doc.localFileUri, doc.croppedImagePath);
             const hasError = imageErrorMap[doc.id];
 
             return (
@@ -334,11 +334,11 @@ export const DocumentsScreen: React.FC = () => {
                   // Read-Only Detail View
                   <View>
                     {/* Cropped Document Image Preview in Modal */}
-                    {documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri) ? (
+                    {documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri, selectedDoc.croppedImagePath) ? (
                       <View style={styles.modalImageWrapper}>
                         <Image
                           source={{
-                            uri: documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri),
+                            uri: documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri, selectedDoc.croppedImagePath),
                             headers: user?.uid ? { 'x-user-id': user.uid } : undefined,
                           }}
                           style={styles.modalImage}
