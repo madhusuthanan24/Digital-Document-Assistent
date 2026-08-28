@@ -11,6 +11,7 @@ import {
   Modal,
   Image,
   ActivityIndicator,
+  Linking,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { theme } from '../../constants/theme';
@@ -42,6 +43,7 @@ export const DocumentsScreen: React.FC = () => {
   const [isSaving, setIsSaving] = useState<boolean>(false);
 
   // PDF Action States
+  const [isViewingPdf, setIsViewingPdf] = useState<boolean>(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState<boolean>(false);
   const [isSharingPdf, setIsSharingPdf] = useState<boolean>(false);
 
@@ -96,6 +98,24 @@ export const DocumentsScreen: React.FC = () => {
   const handleCloseModal = () => {
     setSelectedDoc(null);
     setIsEditMode(false);
+  };
+
+  const handleViewPdf = async (doc: DocumentMetadata) => {
+    setIsViewingPdf(true);
+    try {
+      const pdfUri = await pdfService.generateDocumentPdf(doc);
+      console.log(`[PDF] View PDF generated at: ${pdfUri}`);
+      const supported = await Linking.canOpenURL(pdfUri).catch(() => true);
+      if (supported) {
+        await Linking.openURL(pdfUri);
+      } else {
+        await pdfService.sharePdf(doc);
+      }
+    } catch (err: any) {
+      Alert.alert('Unable to View PDF', err?.message || 'Could not open PDF viewer.');
+    } finally {
+      setIsViewingPdf(false);
+    }
   };
 
   const handleDownloadPdf = async (doc: DocumentMetadata) => {
@@ -455,18 +475,25 @@ export const DocumentsScreen: React.FC = () => {
                     {/* PDF Actions */}
                     <View style={styles.pdfActionsRow}>
                       <Button
+                        title={isViewingPdf ? 'Opening...' : '📄 View PDF'}
+                        onPress={() => handleViewPdf(selectedDoc)}
+                        isLoading={isViewingPdf}
+                        variant="outlined"
+                        style={{ flex: 1, marginRight: 4 }}
+                      />
+                      <Button
                         title={isDownloadingPdf ? 'Saving...' : '📥 Download PDF'}
                         onPress={() => handleDownloadPdf(selectedDoc)}
                         isLoading={isDownloadingPdf}
                         variant="primary"
-                        style={{ flex: 1, marginRight: 6 }}
+                        style={{ flex: 1, marginHorizontal: 4 }}
                       />
                       <Button
                         title={isSharingPdf ? 'Sharing...' : '📤 Share PDF'}
                         onPress={() => handleSharePdf(selectedDoc)}
                         isLoading={isSharingPdf}
                         variant="outlined"
-                        style={{ flex: 1, marginLeft: 6 }}
+                        style={{ flex: 1, marginLeft: 4 }}
                       />
                     </View>
 

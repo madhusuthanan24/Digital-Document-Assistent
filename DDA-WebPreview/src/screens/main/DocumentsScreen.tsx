@@ -647,7 +647,7 @@ export const DocumentsScreen: React.FC = () => {
                     <View style={styles.modalActionStack}>
                       <View style={styles.buttonRow}>
                         <Button
-                          title="💾 Save PDF"
+                          title="📥 Download PDF"
                           onPress={handleSavePdf}
                           isLoading={isExporting}
                           variant="primary"
