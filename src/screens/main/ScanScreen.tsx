@@ -333,7 +333,14 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
       }
     }
 
-    const vaultUri = finalImageUri || originalImageUri;
+    // The cropped image (finalImageUri) is the single canonical document image
+    const isPdf = mimeType === 'application/pdf';
+    const vaultUri = finalImageUri || (isPdf ? originalImageUri : '');
+
+    if (!vaultUri) {
+      Alert.alert('Crop Required', 'Please complete cropping the document before saving to your vault.');
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -362,8 +369,8 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
         issueDate: dynamicFields?.issueDate,
         expiryDate: dynamicFields?.expiryDate,
         fields: dynamicFields,
-        localFileUri: vaultUri || undefined,
-        originalImagePath: originalImageUri || undefined,
+        localFileUri: vaultUri,
+        croppedImagePath: vaultUri,
         fileName: fileName || undefined,
         mimeType: mimeType || undefined,
       });

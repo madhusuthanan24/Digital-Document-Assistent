@@ -115,8 +115,8 @@ class PdfService {
     console.log(`[PDF Log 2] Starting PDF generation for document: ${doc.documentName} (ID: ${doc.id})`);
 
     // Prioritize cropped image path over raw original image
-    const imageUri = doc.croppedImagePath || doc.localFileUri || doc.imagePath;
-    const imageUrl = imageUri ? documentService.getDocumentImageUrl(doc.id, imageUri, doc.localFileUri) : null;
+    const imageUri = doc.croppedImagePath || doc.imagePath || doc.localFileUri;
+    const imageUrl = imageUri ? documentService.getDocumentImageUrl(doc.id, doc.imagePath, doc.localFileUri, doc.croppedImagePath) : null;
 
     console.log(`[PDF Log 2.1] Resolved Cropped Image Target: ${imageUrl || 'None'}`);
 

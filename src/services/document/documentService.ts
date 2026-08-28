@@ -13,17 +13,21 @@ const API_BASE_URL = Platform.OS === 'android' ? 'http://10.0.2.2:5000' : 'http:
 class DocumentService {
   /**
    * Helper to resolve full image URL for a document.
+   * Prioritizes the canonical backend endpoint / croppedImagePath.
    */
-  public getDocumentImageUrl(documentId: string, imagePath?: string, localFileUri?: string, croppedImagePath?: string): string {
-    if (localFileUri && (localFileUri.startsWith('file://') || localFileUri.startsWith('http://') || localFileUri.startsWith('https://'))) {
-      return localFileUri;
-    }
-    const path = croppedImagePath || imagePath;
+  public getDocumentImageUrl(documentId?: string, imagePath?: string, localFileUri?: string, croppedImagePath?: string): string {
     if (documentId) {
       return `${API_BASE_URL}/api/documents/${documentId}/image`;
     }
-    if (path) {
+    const path = croppedImagePath || imagePath;
+    if (path && !path.startsWith('file://') && !path.startsWith('content://')) {
       return `${API_BASE_URL}${path.startsWith('/') ? '' : '/'}${path}`;
+    }
+    if (localFileUri && (localFileUri.startsWith('file://') || localFileUri.startsWith('http://') || localFileUri.startsWith('https://'))) {
+      return localFileUri;
+    }
+    if (path) {
+      return path;
     }
     return '';
   }
