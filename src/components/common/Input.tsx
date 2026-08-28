@@ -12,11 +12,12 @@ import {
 import { theme } from '../../constants/theme';
 
 export interface InputProps extends TextInputProps {
-  label: string;
+  label?: string;
   error?: string;
   helperText?: string;
   isPassword?: boolean;
   containerStyle?: StyleProp<ViewStyle>;
+  rightLabelElement?: React.ReactNode;
 }
 
 export const Input: React.FC<InputProps> = ({
@@ -25,6 +26,7 @@ export const Input: React.FC<InputProps> = ({
   helperText,
   isPassword = false,
   containerStyle,
+  rightLabelElement,
   value,
   onChangeText,
   placeholder,
@@ -41,7 +43,12 @@ export const Input: React.FC<InputProps> = ({
 
   return (
     <View style={[styles.container, containerStyle]}>
-      <Text style={[styles.label, error && styles.errorLabel]}>{label}</Text>
+      {label || rightLabelElement ? (
+        <View style={styles.labelRow}>
+          {label ? <Text style={[styles.label, error && styles.errorLabel]}>{label}</Text> : <View />}
+          {rightLabelElement}
+        </View>
+      ) : null}
       <View style={[styles.inputWrapper, { borderColor: getBorderColor() }]}>
         <TextInput
           style={styles.input}
@@ -78,11 +85,16 @@ const styles = StyleSheet.create({
     marginVertical: theme.spacing.xs,
     width: '100%',
   },
+  labelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: theme.spacing.xs,
+  },
   label: {
     fontSize: 14,
     fontWeight: '600',
     color: theme.colors.textPrimary,
-    marginBottom: theme.spacing.xs,
   },
   errorLabel: {
     color: theme.colors.error,

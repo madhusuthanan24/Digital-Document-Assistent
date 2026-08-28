@@ -70,6 +70,14 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
   const [ocrConfidence, setOcrConfidence] = useState<'high' | 'medium' | 'low' | 'none' | null>(null);
   const [ocrFailed, setOcrFailed] = useState<boolean>(false);
   const [ocrFailMessage, setOcrFailMessage] = useState<string>('');
+  const [fieldConfidence, setFieldConfidence] = useState<Record<string, 'high' | 'medium' | 'low'>>({});
+  const [validatedFields, setValidatedFields] = useState<Record<string, { value: string; confidence: 'HIGH' | 'MEDIUM' | 'LOW'; needsReview: boolean; issue?: string }>>({});
+  const [validationIssues, setValidationIssues] = useState<string[]>([]);
+
+  // Image quality state
+  const [imageQualityBlocked, setImageQualityBlocked] = useState<boolean>(false);
+  const [imageQualityMessage, setImageQualityMessage] = useState<string>('');
+  const [imageQualityWarning, setImageQualityWarning] = useState<string>(''); // MEDIUM quality non-blocking
 
   // Save state
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -78,19 +86,33 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
   const effectiveTemplateKey = detectedDocumentType || categoryToTemplateKey(selectedType) || '';
   const currentTemplate = DOCUMENT_TEMPLATES[effectiveTemplateKey];
 
-  // Category selection handler
+  // Category selection handler — reset all OCR and quality state on category change
   const handleSelectCategory = (cat: DocumentCategory) => {
     setSelectedType(cat);
     const match = DOCUMENT_TYPES.find(t => t.type === cat);
     if (match) { setDocumentName(match.label); }
     setDetectedDocumentType('');
     setDynamicFields({});
+    setFieldConfidence({});
+    setValidatedFields({});
+    setValidationIssues([]);
     setOcrConfidence(null);
     setOcrFailed(false);
+    setImageQualityBlocked(false);
+    setImageQualityMessage('');
+    setImageQualityWarning('');
   };
 
   // Process & apply OCR extraction results
-  const applyOcrResult = (result: { documentType: string; fields: Record<string, string>; confidence: number }) => {
+  const applyOcrResult = (result: {
+    documentType: string;
+    fields: Record<string, string>;
+    validatedFields?: Record<string, { value: string; confidence: 'HIGH' | 'MEDIUM' | 'LOW'; needsReview: boolean; issue?: string }>;
+    fieldConfidence?: Record<string, 'high' | 'medium' | 'low'>;
+    confidence: 'high' | 'medium' | 'low' | 'none' | number;
+    validationIssues?: string[];
+    missingRequiredFields?: string[];
+  }) => {
     const detected = result.documentType;
     setDetectedDocumentType(detected);
 
@@ -105,9 +127,17 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     }
 
     setDynamicFields(result.fields);
+    setValidatedFields(result.validatedFields || {});
+    setValidationIssues(result.validationIssues || []);
+    setFieldConfidence(result.fieldConfidence || {});
 
-    const fieldCount = Object.keys(result.fields).length;
-    setOcrConfidence(fieldCount >= 2 ? 'high' : fieldCount === 1 ? 'medium' : 'none');
+    // Use string confidence tier from ocrService directly
+    if (typeof result.confidence === 'string') {
+      setOcrConfidence(result.confidence as 'high' | 'medium' | 'low' | 'none');
+    } else {
+      const fieldCount = Object.keys(result.fields).length;
+      setOcrConfidence(fieldCount >= 2 ? 'high' : fieldCount === 1 ? 'low' : 'none');
+    }
   };
 
   // Run OCR pipeline against finalImageUri
@@ -123,15 +153,31 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     setOcrFailed(false);
     setOcrFailMessage('');
     setOcrConfidence(null);
+    setImageQualityBlocked(false);
+    setImageQualityMessage('');
+    setImageQualityWarning('');
 
     try {
       const result = await extractDocumentDetails(uri, selectedType);
       applyOcrResult(result);
+
+      // Show non-blocking quality warning for MEDIUM quality images
+      if (result.imageQuality?.quality === 'MEDIUM' && result.imageQuality.issues.length > 0) {
+        setImageQualityWarning(result.imageQuality.issues[0]);
+      }
     } catch (err: any) {
       console.warn(`[OCR] Extraction failed: ${err?.message}`);
-      setOcrFailed(true);
-      setOcrFailMessage(err?.message || 'Automatic extraction could not read this document clearly.');
-      setOcrConfidence('none');
+
+      // Quality block — show dedicated quality card, not the generic OCR error card
+      if (err?.isQualityBlock === true) {
+        setImageQualityBlocked(true);
+        setImageQualityMessage(err.message);
+        setOcrConfidence('none');
+      } else {
+        setOcrFailed(true);
+        setOcrFailMessage(err?.message || 'Automatic extraction could not read this document clearly.');
+        setOcrConfidence('none');
+      }
     } finally {
       setIsExtracting(false);
     }
@@ -149,6 +195,9 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     setOcrFailed(false);
     setDynamicFields({});
     setDetectedDocumentType('');
+    setImageQualityBlocked(false);
+    setImageQualityMessage('');
+    setImageQualityWarning('');
     setShowCropScreen(true);
   };
 
@@ -274,14 +323,37 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
       return;
     }
 
+    // Only validate genuinely required fields for the selected document type
+    if (currentTemplate) {
+      for (const field of currentTemplate.fields) {
+        if (field.required && !dynamicFields[field.key]?.trim()) {
+          Alert.alert('Required Field Missing', `Please enter a value for "${field.label}" before saving.`);
+          return;
+        }
+      }
+    }
+
     const vaultUri = finalImageUri || originalImageUri;
 
     setIsSaving(true);
     try {
+      const docNumber =
+        dynamicFields?.documentNumber ||
+        dynamicFields?.aadhaarNumber ||
+        dynamicFields?.panNumber ||
+        dynamicFields?.passportNumber ||
+        dynamicFields?.epicNumber ||
+        dynamicFields?.voterIdNumber ||
+        dynamicFields?.licenceNumber ||
+        dynamicFields?.registrationNumber ||
+        dynamicFields?.policyNumber ||
+        dynamicFields?.accountNumber ||
+        '';
+
       await documentService.addDocument(user.uid, {
         documentType: selectedType,
         documentName: documentName.trim(),
-        documentNumber: dynamicFields?.documentNumber || dynamicFields?.aadhaarNumber || dynamicFields?.panNumber || dynamicFields?.passportNumber || dynamicFields?.epicNumber || '',
+        documentNumber: docNumber,
         name: dynamicFields?.name || dynamicFields?.fullName,
         fatherName: dynamicFields?.fatherName || dynamicFields?.husbandName,
         gender: dynamicFields?.gender || dynamicFields?.sex,
@@ -464,11 +536,45 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
           </View>
         ) : null}
 
+        {/* Image Quality Block Card — shown when image is too poor to attempt extraction */}
+        {imageQualityBlocked ? (
+          <View style={styles.qualityBlockCard}>
+            <Text style={styles.qualityBlockIcon}>📷</Text>
+            <Text style={styles.qualityBlockTitle}>Image Quality Too Low</Text>
+            <Text style={styles.qualityBlockMessage}>{imageQualityMessage}</Text>
+            <View style={styles.ocrFailActions}>
+              <TouchableOpacity style={styles.ocrFailBtn} onPress={handleCropAgain}>
+                <Text style={styles.ocrFailBtnText}>Re-Crop</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.ocrFailBtn} onPress={handleOpenCamera}>
+                <Text style={styles.ocrFailBtnText}>Retake Photo</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.ocrFailBtn, styles.ocrFailBtnSecondary]}
+                onPress={() => {
+                  setImageQualityBlocked(false);
+                  setImageQualityMessage('');
+                }}
+              >
+                <Text style={[styles.ocrFailBtnText, styles.ocrFailBtnTextSecondary]}>Enter Manually</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : null}
+
+        {/* Image Quality Warning Banner — shown for MEDIUM quality images that proceeded */}
+        {imageQualityWarning && !imageQualityBlocked ? (
+          <View style={styles.qualityWarnBanner}>
+            <Text style={styles.qualityWarnIcon}>⚠️</Text>
+            <Text style={styles.qualityWarnText}>{imageQualityWarning}</Text>
+          </View>
+        ) : null}
+
         {/* OCR Failure Card & Action Buttons */}
         {ocrFailed ? (
           <View style={styles.ocrFailCard}>
             <Text style={styles.ocrFailTitle}>
-              Automatic extraction could not read this document clearly. You can retry with a clearer crop or enter the details manually.
+              {ocrFailMessage || 'Some details could not be extracted. Please verify the fields manually or retake the document image.'}
             </Text>
             <View style={styles.ocrFailActions}>
               <TouchableOpacity style={styles.ocrFailBtn} onPress={handleCropAgain}>
@@ -493,6 +599,15 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
         {/* Document Fields Form */}
         <Text style={styles.sectionLabel}>3. Confirm Document Details</Text>
         <View style={styles.formCard}>
+          {validationIssues.length > 0 ? (
+            <View style={styles.validationNoticeBox}>
+              <Text style={styles.validationNoticeTitle}>⚠️ Fields Requiring Verification</Text>
+              {validationIssues.slice(0, 3).map((iss, i) => (
+                <Text key={i} style={styles.validationNoticeItem}>• {iss}</Text>
+              ))}
+            </View>
+          ) : null}
+
           <Input
             label="Document Name *"
             value={documentName}
@@ -502,32 +617,111 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
 
           {currentTemplate ? (
             <>
-              {currentTemplate.fields.map(field => (
-                <Input
-                  key={field.key}
-                  label={field.label + (field.required ? ' *' : '')}
-                  value={dynamicFields[field.key] || ''}
-                  onChangeText={text =>
-                    setDynamicFields(prev => ({ ...prev, [field.key]: text }))
-                  }
-                />
-              ))}
+              {currentTemplate.fields.map(field => {
+                const valInfo = validatedFields[field.key];
+                const conf = fieldConfidence[field.key];
+
+                return (
+                  <View key={field.key} style={styles.fieldWrapper}>
+                    <Input
+                      label={field.label + (field.required ? ' *' : '')}
+                      value={dynamicFields[field.key] || ''}
+                      onChangeText={text => {
+                        setDynamicFields(prev => ({ ...prev, [field.key]: text }));
+                        if (validatedFields[field.key]?.needsReview) {
+                          setValidatedFields(prev => ({
+                            ...prev,
+                            [field.key]: {
+                              ...prev[field.key],
+                              needsReview: false,
+                              issue: undefined,
+                              confidence: 'HIGH',
+                            },
+                          }));
+                        }
+                      }}
+                      placeholder={`Enter ${field.label.toLowerCase()}`}
+                      rightLabelElement={
+                        conf === 'high' ? (
+                          <View style={styles.confidencePillHigh}>
+                            <Text style={styles.confidenceTextHigh}>🟢 High confidence</Text>
+                          </View>
+                        ) : conf === 'medium' ? (
+                          <View style={styles.confidencePillMedium}>
+                            <Text style={styles.confidenceTextMedium}>🟡 Needs verification</Text>
+                          </View>
+                        ) : conf === 'low' ? (
+                          <View style={styles.confidencePillLow}>
+                            <Text style={styles.confidenceTextLow}>🔴 Needs review</Text>
+                          </View>
+                        ) : null
+                      }
+                      error={valInfo?.needsReview && valInfo.issue ? valInfo.issue : undefined}
+                    />
+                  </View>
+                );
+              })}
             </>
           ) : (
             Object.entries(dynamicFields).length > 0 ? (
               <>
-                {Object.entries(dynamicFields).map(([key, value]) => (
-                  <Input
-                    key={key}
-                    label={key.replace(/_/g, ' ')}
-                    value={value}
-                    onChangeText={text =>
-                      setDynamicFields(prev => ({ ...prev, [key]: text }))
-                    }
-                  />
-                ))}
+                {Object.entries(dynamicFields).map(([key, value]) => {
+                  const valInfo = validatedFields[key];
+                  const conf = fieldConfidence[key];
+                  const formattedLabel = key
+                    .replace(/([A-Z])/g, ' $1')
+                    .replace(/_/g, ' ')
+                    .replace(/^\w/, c => c.toUpperCase())
+                    .trim();
+
+                  return (
+                    <View key={key} style={styles.fieldWrapper}>
+                      <Input
+                        label={formattedLabel}
+                        value={value || ''}
+                        onChangeText={text => {
+                          setDynamicFields(prev => ({ ...prev, [key]: text }));
+                          if (validatedFields[key]?.needsReview) {
+                            setValidatedFields(prev => ({
+                              ...prev,
+                              [key]: {
+                                ...prev[key],
+                                needsReview: false,
+                                issue: undefined,
+                                confidence: 'HIGH',
+                              },
+                            }));
+                          }
+                        }}
+                        placeholder={`Enter ${formattedLabel.toLowerCase()}`}
+                        rightLabelElement={
+                          conf === 'high' ? (
+                            <View style={styles.confidencePillHigh}>
+                              <Text style={styles.confidenceTextHigh}>🟢 High confidence</Text>
+                            </View>
+                          ) : conf === 'medium' ? (
+                            <View style={styles.confidencePillMedium}>
+                              <Text style={styles.confidenceTextMedium}>🟡 Needs verification</Text>
+                            </View>
+                          ) : conf === 'low' ? (
+                            <View style={styles.confidencePillLow}>
+                              <Text style={styles.confidenceTextLow}>🔴 Needs review</Text>
+                            </View>
+                          ) : null
+                        }
+                        error={valInfo?.needsReview && valInfo.issue ? valInfo.issue : undefined}
+                      />
+                    </View>
+                  );
+                })}
               </>
-            ) : null
+            ) : (
+              <View style={styles.noFieldsContainer}>
+                <Text style={styles.noFieldsText}>
+                  No fields were automatically detected. You can add document details manually above.
+                </Text>
+              </View>
+            )
           )}
 
           <Button
@@ -757,5 +951,139 @@ const styles = StyleSheet.create({
   },
   saveBtn: {
     marginTop: theme.spacing.md,
+  },
+  // Quality block card — shown when image is unusable
+  qualityBlockCard: {
+    backgroundColor: '#FFF7ED',
+    borderColor: '#FED7AA',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 16,
+    marginBottom: theme.spacing.md,
+    alignItems: 'center',
+  },
+  qualityBlockIcon: {
+    fontSize: 36,
+    marginBottom: 8,
+  },
+  qualityBlockTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#9A3412',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  qualityBlockMessage: {
+    fontSize: 13,
+    color: '#7C2D12',
+    textAlign: 'center',
+    marginBottom: 14,
+    lineHeight: 19,
+  },
+  // Quality warning banner — non-blocking caution for MEDIUM quality
+  qualityWarnBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#FFFBEB',
+    borderColor: '#FDE68A',
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: theme.spacing.sm,
+  },
+  qualityWarnIcon: {
+    fontSize: 16,
+    marginRight: 8,
+    marginTop: 1,
+  },
+  qualityWarnText: {
+    fontSize: 12,
+    color: '#92400E',
+    flex: 1,
+    lineHeight: 18,
+  },
+  // Validation notices
+  validationNoticeBox: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FCA5A5',
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  validationNoticeTitle: {
+    color: '#991B1B',
+    fontWeight: '700',
+    fontSize: 13,
+    marginBottom: 4,
+  },
+  validationNoticeItem: {
+    color: '#B91C1C',
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  fieldWrapper: {
+    marginBottom: 8,
+  },
+  fieldIssueNotice: {
+    color: '#DC2626',
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: -6,
+    marginBottom: 8,
+    marginLeft: 4,
+  },
+  // Confidence pills
+  confidencePillHigh: {
+    backgroundColor: '#DCFCE7',
+    borderColor: '#86EFAC',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+  },
+  confidenceTextHigh: {
+    color: '#15803D',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  confidencePillMedium: {
+    backgroundColor: '#FEF9C3',
+    borderColor: '#FDE047',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+  },
+  confidenceTextMedium: {
+    color: '#A16207',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  confidencePillLow: {
+    backgroundColor: '#FEE2E2',
+    borderColor: '#FCA5A5',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+  },
+  confidenceTextLow: {
+    color: '#B91C1C',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  noFieldsContainer: {
+    padding: 16,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 12,
+  },
+  noFieldsText: {
+    color: '#64748B',
+    fontSize: 13,
+    textAlign: 'center',
   },
 });

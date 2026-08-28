@@ -95,6 +95,46 @@ export const DOCUMENT_TEMPLATES: Record<
       { key: 'percentage', label: 'Percentage / CGPA' },
     ],
   },
+
+  'Bank Document': {
+    fields: [
+      { key: 'bankName', label: 'Bank Name', required: true },
+      { key: 'accountHolderName', label: 'Account Holder Name' },
+      { key: 'accountNumber', label: 'Account Number' },
+      { key: 'ifscCode', label: 'IFSC Code' },
+      { key: 'branchName', label: 'Branch Name' },
+      { key: 'statementPeriod', label: 'Statement Period' },
+      { key: 'openingBalance', label: 'Opening Balance' },
+      { key: 'closingBalance', label: 'Closing Balance' },
+    ],
+  },
+
+  'Medical Document': {
+    fields: [
+      { key: 'patientName', label: 'Patient Name', required: true },
+      { key: 'doctorName', label: 'Doctor / Consultant' },
+      { key: 'hospitalName', label: 'Hospital / Clinic' },
+      { key: 'documentDate', label: 'Date' },
+      { key: 'diagnosis', label: 'Diagnosis / Condition' },
+      { key: 'medications', label: 'Medications' },
+      { key: 'testName', label: 'Test Name' },
+      { key: 'testResult', label: 'Test Result' },
+    ],
+  },
+
+  'Electronic Product': {
+    fields: [
+      { key: 'brand', label: 'Brand', required: true },
+      { key: 'model', label: 'Model' },
+      { key: 'serialNumber', label: 'Serial Number' },
+      { key: 'processor', label: 'Processor' },
+      { key: 'memory', label: 'Memory / RAM' },
+      { key: 'storage', label: 'Storage' },
+      { key: 'purchaseDate', label: 'Purchase Date' },
+      { key: 'warrantyExpiry', label: 'Warranty Expiry' },
+      { key: 'price', label: 'Price' },
+    ],
+  },
 };
 
 /**
@@ -129,6 +169,9 @@ export function templateKeyToCategory(documentType: string): string | undefined 
     'Vehicle RC': 'VehicleRC',
     'Insurance Policy': 'Insurance',
     'Educational Certificate': 'EducationalCertificate',
+    'Bank Document': 'Other',
+    'Medical Document': 'Other',
+    'Electronic Product': 'Other',
   };
   return map[documentType];
 }

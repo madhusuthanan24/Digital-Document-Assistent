@@ -29,7 +29,7 @@ const styles = StyleSheet.create({
     padding: theme.spacing.lg,
   },
   overlayContainer: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(15, 23, 42, 0.4)',
     zIndex: 999,
   },
