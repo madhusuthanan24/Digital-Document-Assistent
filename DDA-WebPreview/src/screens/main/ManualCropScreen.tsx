@@ -444,60 +444,79 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
       const current = cropRectRef.current || cropRect;
       const { offsetX: ox, offsetY: oy, displayW: dW, displayH: dH } = layoutRef.current;
 
-      const cropDisplayX = Math.max(0, current.left - ox);
-      const cropDisplayY = Math.max(0, current.top - oy);
-      const cropDisplayW = Math.min(dW - cropDisplayX, current.right - current.left);
-      const cropDisplayH = Math.min(dH - cropDisplayY, current.bottom - current.top);
+      // 1. Convert container cropRect into display image space (subtract ox and oy)
+      const cropImageX = Math.max(0, current.left - ox);
+      const cropImageY = Math.max(0, current.top - oy);
+      const cropImageRight = Math.min(dW, current.right - ox);
+      const cropImageBottom = Math.min(dH, current.bottom - oy);
 
-      const scaleX = effImgW / dW;
-      const scaleY = effImgH / dH;
+      const cropImageW = Math.max(0, cropImageRight - cropImageX);
+      const cropImageH = Math.max(0, cropImageBottom - cropImageY);
 
-      const pixelX = Math.max(0, Math.round(cropDisplayX * scaleX));
-      const pixelY = Math.max(0, Math.round(cropDisplayY * scaleY));
-      const pixelW = Math.max(1, Math.min(Math.round(cropDisplayW * scaleX), effImgW - pixelX));
-      const pixelH = Math.max(1, Math.min(Math.round(cropDisplayH * scaleY), effImgH - pixelY));
+      // 2. Visual Image Dimensions
+      const visualWidth = effImgW;
+      const visualHeight = effImgH;
 
-      let origX: number;
-      let origY: number;
-      let origW: number;
-      let origH: number;
+      // 3. Proportional scale factors (must be uniform)
+      const scaleX = visualWidth / dW;
+      const scaleY = visualHeight / dH;
 
-      switch (rotation) {
-        case 90:
-          origX = pixelY;
-          origY = rawImgH - pixelX - pixelW;
-          origW = pixelH;
-          origH = pixelW;
-          break;
-        case 180:
-          origX = rawImgW - pixelX - pixelW;
-          origY = rawImgH - pixelY - pixelH;
-          origW = pixelW;
-          origH = pixelH;
-          break;
-        case 270:
-          origX = rawImgW - pixelY - pixelH;
-          origY = pixelX;
-          origW = pixelH;
-          origH = pixelW;
-          break;
-        default:
-          origX = pixelX;
-          origY = pixelY;
-          origW = pixelW;
-          origH = pixelH;
+      if (Math.abs(scaleX - scaleY) / Math.max(scaleX, scaleY) > 0.01) {
+        console.error(`[MANUAL CROP ERROR] Scale factor inconsistency: scaleX=${scaleX.toFixed(4)}, scaleY=${scaleY.toFixed(4)}`);
       }
 
-      origX = Math.max(0, Math.min(origX, rawImgW - 1));
-      origY = Math.max(0, Math.min(origY, rawImgH - 1));
-      origW = Math.max(1, Math.min(origW, rawImgW - origX));
-      origH = Math.max(1, Math.min(origH, rawImgH - origY));
+      // 4. Convert display-space crop into visual pixel space
+      let pixelX = Math.max(0, Math.round(cropImageX * scaleX));
+      let pixelY = Math.max(0, Math.round(cropImageY * scaleY));
+      let pixelW = Math.max(1, Math.round(cropImageW * scaleX));
+      let pixelH = Math.max(1, Math.round(cropImageH * scaleY));
 
-      console.log(`[Crop] Original URI: ${imageUri}`);
-      console.log(`[Crop] Original dimensions: ${rawImgW}x${rawImgH}`);
-      console.log(`[Crop] Display dimensions: ${dW.toFixed(1)}x${dH.toFixed(1)}`);
-      console.log(`[Crop] Crop display rect: left=${current.left.toFixed(1)}, top=${current.top.toFixed(1)}, right=${current.right.toFixed(1)}, bottom=${current.bottom.toFixed(1)}`);
-      console.log(`[Crop] Crop original rect: origX=${origX}, origY=${origY}, origW=${origW}, origH=${origH}`);
+      // 5. Clamp to visual bitmap boundaries
+      pixelX = Math.max(0, Math.min(pixelX, visualWidth - 1));
+      pixelY = Math.max(0, Math.min(pixelY, visualHeight - 1));
+      pixelW = Math.max(1, Math.min(pixelW, visualWidth - pixelX));
+      pixelH = Math.max(1, Math.min(pixelH, visualHeight - pixelY));
+
+      // 6. User UI rotation mapping
+      let finalOrigX = pixelX;
+      let finalOrigY = pixelY;
+      let finalOrigW = pixelW;
+      let finalOrigH = pixelH;
+
+      if (rotation === 90) {
+        finalOrigX = pixelY;
+        finalOrigY = rawImgH - pixelX - pixelW;
+        finalOrigW = pixelH;
+        finalOrigH = pixelW;
+      } else if (rotation === 180) {
+        finalOrigX = rawImgW - pixelX - pixelW;
+        finalOrigY = rawImgH - pixelY - pixelH;
+        finalOrigW = pixelW;
+        finalOrigH = pixelH;
+      } else if (rotation === 270) {
+        finalOrigX = rawImgW - pixelY - pixelH;
+        finalOrigY = pixelX;
+        finalOrigW = pixelH;
+        finalOrigH = pixelW;
+      }
+
+      finalOrigX = Math.max(0, Math.min(finalOrigX, rawW - 1));
+      finalOrigY = Math.max(0, Math.min(finalOrigY, rawH - 1));
+      finalOrigW = Math.max(1, Math.min(finalOrigW, rawW - finalOrigX));
+      finalOrigH = Math.max(1, Math.min(finalOrigH, rawH - finalOrigY));
+
+      // 7. Temporary verbose debug logging as required
+      console.log(`[MANUAL CROP DEBUG]
+raw dimensions: ${rawW}x${rawH}
+EXIF orientation: ${exifOrientation}
+visual dimensions: ${visualWidth}x${visualHeight}
+container: ${containerW}x${containerH}
+display: ${dW.toFixed(1)}x${dH.toFixed(1)}
+offset: ${ox.toFixed(1)},${oy.toFixed(1)}
+cropRect: ${current.left.toFixed(1)},${current.top.toFixed(1)},${current.right.toFixed(1)},${current.bottom.toFixed(1)}
+image-space crop: ${cropImageX.toFixed(1)},${cropImageY.toFixed(1)},${cropImageW.toFixed(1)},${cropImageH.toFixed(1)}
+pixel crop: ${finalOrigX},${finalOrigY},${finalOrigW},${finalOrigH}
+scale: ${scaleX.toFixed(4)},${scaleY.toFixed(4)}`);
 
       const actions: any[] = [];
       if (rotation > 0) {
@@ -505,10 +524,10 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
       }
       actions.push({
         crop: {
-          originX: origX,
-          originY: origY,
-          width: origW,
-          height: origH,
+          originX: finalOrigX,
+          originY: finalOrigY,
+          width: finalOrigW,
+          height: finalOrigH,
         },
       });
 
@@ -521,8 +540,8 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
 
       onCrop({
         uri: cropResult.uri,
-        width: cropResult.width || origW,
-        height: cropResult.height || origH,
+        width: cropResult.width || finalOrigW,
+        height: cropResult.height || finalOrigH,
       });
     } catch (err: any) {
       console.error('[Crop] Error executing crop:', err);
