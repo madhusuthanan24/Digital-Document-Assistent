@@ -228,6 +228,12 @@ function validateParsedStructure(
     return null;
   }
 
+  if (parsed.multipleDocumentsDetected === true || parsed.multipleDocuments === true) {
+    const err = new Error('Multiple documents were detected in one image. Please crop and scan one document at a time.');
+    (err as any).isMultiDocError = true;
+    throw err;
+  }
+
   const docType = String(parsed.documentType || parsed.type || parsed.docType || hintType || 'Other Document').trim();
   let rawFieldsObj: any = null;
 
@@ -608,6 +614,8 @@ export async function extractDocumentDetails(
 // ---------------------------------------------------------------------------
 // Helper: Corrective Prompt Builder for Attempt 2
 // ---------------------------------------------------------------------------
+// Helper: Corrective Prompt Builder for Attempt 2
+// ---------------------------------------------------------------------------
 function buildCorrectivePrompt(
   basePrompt: string,
   reasons: {
@@ -617,27 +625,43 @@ function buildCorrectivePrompt(
     validationIssues: string[];
   }
 ): string {
-  let directive = '';
+  let directives: string[] = [];
+
   if (reasons.jsonFailed) {
-    directive =
-      'Previous attempt failed to produce valid JSON. Output ONLY a valid JSON object matching the requested schema. No conversational prose, no markdown code fences.';
-  } else if (reasons.typeUnclear) {
-    directive =
-      'Previous attempt could not reliably identify the document type. Carefully inspect the header, emblem, logo, and title on this document image. Identify the document type and extract only clearly visible fields without guessing.';
-  } else if (reasons.missingRequired.length > 0) {
-    directive = `Previous extraction was incomplete. The following important fields were missing: ${reasons.missingRequired.join(
-      ', '
-    )}. Carefully inspect the image again. Do not guess. Extract only clearly visible fields.`;
-  } else if (reasons.validationIssues.length > 0) {
-    directive = `Previous extraction contained issues: ${reasons.validationIssues
-      .slice(0, 2)
-      .join('; ')}. Carefully re-inspect the printed text in the image. Preserve exactly what is printed. Do not invent missing information.`;
-  } else {
-    directive =
-      'Previous extraction was incomplete. Carefully inspect the image again. Do not guess. Extract only clearly visible fields.';
+    directives.push(
+      'CRITICAL: Previous attempt failed to produce valid JSON. Output ONLY a raw JSON object matching the schema. Do NOT output conversational text or markdown fences.'
+    );
   }
 
-  return `CORRECTIVE INSTRUCTION:\n${directive}\n\n${basePrompt}`;
+  if (reasons.typeUnclear) {
+    directives.push(
+      'CRITICAL: Previous attempt could not reliably identify the document type. Visually inspect the header, emblem, logo, watermark, and title. Identify the exact document category and extract only clearly visible fields.'
+    );
+  }
+
+  if (reasons.missingRequired.length > 0) {
+    directives.push(
+      `MISSING FIELDS RE-EXAMINATION: The following required fields were missing in Attempt 1: [${reasons.missingRequired.join(
+        ', '
+      )}]. Visually inspect top, middle, and bottom of the image character-by-character. Locate and extract these exact printed fields without guessing.`
+    );
+  }
+
+  if (reasons.validationIssues.length > 0) {
+    directives.push(
+      `VALIDATION ISSUES RE-EXAMINATION: The following fields contained format or logic issues: [${reasons.validationIssues
+        .slice(0, 3)
+        .join('; ')}]. Re-examine these specific fields character-by-character from the image. Read exact printed characters. Do not invent missing information.`
+    );
+  }
+
+  if (directives.length === 0) {
+    directives.push(
+      'Previous extraction was incomplete. Inspect the image character-by-character again. Do not guess. Extract only clearly visible fields.'
+    );
+  }
+
+  return `CORRECTIVE INSTRUCTIONS FOR ATTEMPT 2:\n${directives.join('\n\n')}\n\n${basePrompt}`;
 }
 
   // ── Stage 5: Attempt 1 — Normal Extraction ───────────────────────────────
