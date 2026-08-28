@@ -33,6 +33,7 @@ import {
 } from 'react-native';
 import ImageEditor from '@react-native-community/image-editor';
 import { theme } from '../../constants/theme';
+import { parseExifOrientation } from '../../services/ocr/imagePreprocessor';
 
 export interface ManualCropResult {
   uri: string;
@@ -76,12 +77,13 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
     width: imageWidth || 0,
     height: imageHeight || 0,
   });
+  const [exifOrientation, setExifOrientation] = useState<number>(1);
 
   const [rotation, setRotation] = useState<number>(0);
   const [isCropping, setIsCropping] = useState<boolean>(false);
   const [lastTouchedHandle, setLastTouchedHandle] = useState<string>('None');
 
-  // Measure image dimensions if zero/missing
+  // Measure image dimensions and read EXIF orientation to align visual dimensions
   useEffect(() => {
     if (imageUri) {
       if (imageWidth > 0 && imageHeight > 0) {
@@ -98,11 +100,38 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
           }
         );
       }
+
+      // Read EXIF orientation to check if width/height need visual swap
+      (async () => {
+        try {
+          const RNFS = require('react-native-fs');
+          const base64Chunk = await RNFS.read(imageUri.replace('file://', ''), 65536, 0, 'base64');
+          if (base64Chunk) {
+            const binaryStr = typeof atob === 'function' ? atob(base64Chunk) : Buffer.from(base64Chunk, 'base64').toString('binary');
+            const bytes = new Uint8Array(binaryStr.length);
+            for (let i = 0; i < binaryStr.length; i++) {
+              bytes[i] = binaryStr.charCodeAt(i);
+            }
+            const info = parseExifOrientation(bytes);
+            if (info.detected) {
+              console.log(`[CropScreen] EXIF orientation detected: ${info.label} (tag ${info.orientation})`);
+              setExifOrientation(info.orientation);
+            }
+          }
+        } catch {
+          // Default orientation 1
+        }
+      })();
     }
   }, [imageUri, imageWidth, imageHeight]);
 
-  const rawImgW = measuredSize.width || 1000;
-  const rawImgH = measuredSize.height || 1000;
+  const rawW = measuredSize.width || 1000;
+  const rawH = measuredSize.height || 1000;
+
+  // Swap raw width/height if EXIF orientation is 6 (90° CW) or 8 (270° CW)
+  const isExifSwapped = exifOrientation === 6 || exifOrientation === 8;
+  const rawImgW = isExifSwapped ? rawH : rawW;
+  const rawImgH = isExifSwapped ? rawW : rawH;
 
   const isRotated90 = rotation === 90 || rotation === 270;
   const effImgW = isRotated90 ? rawImgH : rawImgW;
