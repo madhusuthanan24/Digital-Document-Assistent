@@ -530,19 +530,6 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
           </View>
         ) : null}
 
-        {/* OCR Confidence Badge */}
-        {ocrBadgeConfig ? (
-          <View style={[
-            styles.ocrBadge,
-            { backgroundColor: ocrBadgeConfig.bg, borderColor: ocrBadgeConfig.border },
-          ]}>
-            <Text style={styles.ocrBadgeIcon}>{ocrBadgeConfig.icon}</Text>
-            <Text style={[styles.ocrBadgeText, { color: ocrBadgeConfig.color }]}>
-              {ocrBadgeConfig.text}
-            </Text>
-          </View>
-        ) : null}
-
         {/* Image Quality Block Card — shown when image is too poor to attempt extraction */}
         {imageQualityBlocked ? (
           <View style={styles.qualityBlockCard}>
@@ -626,7 +613,6 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
             <>
               {currentTemplate.fields.map(field => {
                 const valInfo = validatedFields[field.key];
-                const conf = fieldConfidence[field.key];
 
                 return (
                   <View key={field.key} style={styles.fieldWrapper}>
@@ -648,21 +634,6 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
                         }
                       }}
                       placeholder={`Enter ${field.label.toLowerCase()}`}
-                      rightLabelElement={
-                        conf === 'high' ? (
-                          <View style={styles.confidencePillHigh}>
-                            <Text style={styles.confidenceTextHigh}>🟢 High confidence</Text>
-                          </View>
-                        ) : conf === 'medium' ? (
-                          <View style={styles.confidencePillMedium}>
-                            <Text style={styles.confidenceTextMedium}>🟡 Needs verification</Text>
-                          </View>
-                        ) : conf === 'low' ? (
-                          <View style={styles.confidencePillLow}>
-                            <Text style={styles.confidenceTextLow}>🔴 Needs review</Text>
-                          </View>
-                        ) : null
-                      }
                       error={valInfo?.needsReview && valInfo.issue ? valInfo.issue : undefined}
                     />
                   </View>
@@ -674,7 +645,6 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
               <>
                 {Object.entries(dynamicFields).map(([key, value]) => {
                   const valInfo = validatedFields[key];
-                  const conf = fieldConfidence[key];
                   const formattedLabel = key
                     .replace(/([A-Z])/g, ' $1')
                     .replace(/_/g, ' ')
@@ -701,21 +671,6 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
                           }
                         }}
                         placeholder={`Enter ${formattedLabel.toLowerCase()}`}
-                        rightLabelElement={
-                          conf === 'high' ? (
-                            <View style={styles.confidencePillHigh}>
-                              <Text style={styles.confidenceTextHigh}>🟢 High confidence</Text>
-                            </View>
-                          ) : conf === 'medium' ? (
-                            <View style={styles.confidencePillMedium}>
-                              <Text style={styles.confidenceTextMedium}>🟡 Needs verification</Text>
-                            </View>
-                          ) : conf === 'low' ? (
-                            <View style={styles.confidencePillLow}>
-                              <Text style={styles.confidenceTextLow}>🔴 Needs review</Text>
-                            </View>
-                          ) : null
-                        }
                         error={valInfo?.needsReview && valInfo.issue ? valInfo.issue : undefined}
                       />
                     </View>
