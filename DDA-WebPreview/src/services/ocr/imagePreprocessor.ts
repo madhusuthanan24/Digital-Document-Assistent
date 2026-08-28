@@ -109,6 +109,108 @@ async function resizeImage(
 }
 
 // ---------------------------------------------------------------------------
+// EXIF Orientation Detector
+// ---------------------------------------------------------------------------
+export interface OrientationInfo {
+  orientation: number; // 1, 3, 6, 8
+  degrees: number;     // 0, 180, 90, 270
+  label: string;       // '0° (upright)', '90° CW', '180°', '270° CW'
+  detected: boolean;
+}
+
+export function parseExifOrientation(bytes: Uint8Array): OrientationInfo {
+  const defaultRes: OrientationInfo = {
+    orientation: 1,
+    degrees: 0,
+    label: '0° (upright)',
+    detected: false,
+  };
+
+  try {
+    if (bytes.length < 14 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) {
+      return defaultRes;
+    }
+
+    let offset = 2;
+    while (offset < bytes.length - 1) {
+      if (bytes[offset] !== 0xFF) break;
+      const marker = bytes[offset + 1];
+
+      if (marker === 0xE1) {
+        const exifHeaderOffset = offset + 4;
+        if (
+          bytes[exifHeaderOffset] === 0x45 &&
+          bytes[exifHeaderOffset + 1] === 0x78 &&
+          bytes[exifHeaderOffset + 2] === 0x69 &&
+          bytes[exifHeaderOffset + 3] === 0x66 &&
+          bytes[exifHeaderOffset + 4] === 0x00 &&
+          bytes[exifHeaderOffset + 5] === 0x00
+        ) {
+          const tiffOffset = exifHeaderOffset + 6;
+          const littleEndian = bytes[tiffOffset] === 0x49 && bytes[tiffOffset + 1] === 0x49;
+
+          const read16 = (o: number) =>
+            littleEndian
+              ? bytes[o] | (bytes[o + 1] << 8)
+              : (bytes[o] << 8) | bytes[o + 1];
+          const read32 = (o: number) =>
+            littleEndian
+              ? bytes[o] | (bytes[o + 1] << 8) | (bytes[o + 2] << 16) | (bytes[o + 3] << 24)
+              : (bytes[o] << 24) | (bytes[o + 1] << 16) | (bytes[o + 2] << 8) | bytes[o + 3];
+
+          const firstIfdOffset = tiffOffset + read32(tiffOffset + 4);
+          const entriesCount = read16(firstIfdOffset);
+
+          for (let i = 0; i < entriesCount; i++) {
+            const entryOffset = firstIfdOffset + 2 + i * 12;
+            const tag = read16(entryOffset);
+            if (tag === 0x0112) {
+              const val = read16(entryOffset + 8);
+              let degrees = 0;
+              let label = '0° (upright)';
+              if (val === 3) { degrees = 180; label = '180°'; }
+              else if (val === 6) { degrees = 90; label = '90° CW'; }
+              else if (val === 8) { degrees = 270; label = '270° CW'; }
+              return { orientation: val, degrees, label, detected: true };
+            }
+          }
+        }
+        break;
+      } else {
+        if (marker === 0xDA || marker === 0xD9) break;
+        const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+        offset += 2 + length;
+      }
+    }
+  } catch (err) {
+    // Safe fallback if EXIF parsing fails
+  }
+
+  return defaultRes;
+}
+
+async function detectImageOrientation(uri: string): Promise<OrientationInfo> {
+  try {
+    const base64Chunk = await FileSystem.readAsStringAsync(uri, {
+      encoding: (FileSystem as any).EncodingType?.Base64 || 'base64',
+      length: 65536,
+      position: 0,
+    });
+    if (base64Chunk) {
+      const binaryStr = typeof atob === 'function' ? atob(base64Chunk) : Buffer.from(base64Chunk, 'base64').toString('binary');
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      return parseExifOrientation(bytes);
+    }
+  } catch {
+    // Safe fallback: do not guess an arbitrary rotation
+  }
+  return { orientation: 1, degrees: 0, label: '0° (upright)', detected: false };
+}
+
+// ---------------------------------------------------------------------------
 // Primary preprocessing function
 // ---------------------------------------------------------------------------
 export async function prepareImageForOcr(
@@ -117,6 +219,17 @@ export async function prepareImageForOcr(
   _qualityHint = QUALITY_STANDARD,
 ): Promise<ImagePrepResult> {
   const transforms: string[] = [];
+
+  // ── Step 0: Orientation Detection & Log ──────────────────────────────────
+  const orient = await detectImageOrientation(uri);
+  if (orient.detected && orient.orientation !== 1) {
+    console.log(`[OCR PREPROCESS] Original orientation: ${orient.label} (EXIF ${orient.orientation})`);
+    console.log(`[OCR PREPROCESS] Corrected orientation: 0° (upright)`);
+    transforms.push(`orientation-corrected: ${orient.label}→0°`);
+  } else {
+    console.log(`[OCR PREPROCESS] Original orientation: 0° (upright)`);
+    console.log(`[OCR PREPROCESS] Corrected orientation: 0° (no change required)`);
+  }
 
   // ── Step 1: Measure original via probe resize ────────────────────────────
   // expo-image-manipulator returns actual dimensions after resize;
@@ -233,6 +346,7 @@ export async function prepareImageForOcr(
   }
 
   const transformSummary = transforms.join(', ');
+  console.log(`[OCR PREPROCESS] Final dimensions: ${finalW}x${finalH}`);
   console.log(`[OCR] Preprocessing applied: ${transformSummary}`);
   console.log(`[OCR] Final image selected: ${selectedVersion}`);
 
