@@ -31,6 +31,19 @@ const createDocument = async (req, res) => {
       return errorResponse(res, 'documentType and documentName are required', 400);
     }
 
+    // Ensure User record exists in PostgreSQL database
+    const userExists = await prisma.user.findUnique({ where: { id: userId } });
+    if (!userExists) {
+      await prisma.user.create({
+        data: {
+          id: userId,
+          name: name || 'Document Owner',
+          email: `${userId}@dda.local`,
+          password: 'hashed_password',
+        },
+      });
+    }
+
     const imagePath = req.file ? `/uploads/${req.file.filename}` : (bodyImagePath || null);
     const mimeType = req.file ? req.file.mimetype : (req.body.mimeType || 'image/jpeg');
 
@@ -309,6 +322,85 @@ const getDocumentImage = async (req, res) => {
   }
 };
 
+/**
+ * Correct Document Field (Authenticated & Ownership Verified)
+ * POST /api/documents/:id/correction
+ */
+const correctDocumentField = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { field, value } = req.body;
+    const userId = req.user?.userId || req.user?.id || req.headers['x-user-id'];
+
+    if (!id || !userId) {
+      return errorResponse(res, 'Document ID and User ID are required', 400);
+    }
+
+    if (!field || typeof field !== 'string') {
+      return errorResponse(res, 'Field name is required', 400);
+    }
+
+    const document = await prisma.document.findUnique({
+      where: { id },
+    });
+
+    if (!document) {
+      return errorResponse(res, 'Document not found', 404);
+    }
+
+    // MANDATORY SECURITY: Verify authenticatedUserId === document.userId
+    if (document.userId !== userId) {
+      console.warn(`[SECURITY] Unauthorized correction attempt by user "${userId}" on document "${id}" owned by "${document.userId}"`);
+      return errorResponse(res, 'Access denied: You do not own this document', 403);
+    }
+
+    // Whitelist allowed fields to prevent arbitrary column mutation
+    const allowedFields = [
+      'documentNumber', 'name', 'fatherName', 'gender', 'address',
+      'dateOfBirth', 'issueDate', 'expiryDate', 'documentType', 'documentName'
+    ];
+
+    if (!allowedFields.includes(field)) {
+      return errorResponse(res, `Field "${field}" is not allowed for correction`, 400);
+    }
+
+    // Parse existing JSON fields string
+    let parsedFields = {};
+    if (document.fields) {
+      try {
+        parsedFields = typeof document.fields === 'string' ? JSON.parse(document.fields) : document.fields;
+      } catch (pErr) {
+        parsedFields = {};
+      }
+    }
+
+    // Update field value
+    const updatedValue = value !== undefined && value !== null ? String(value).trim() : '';
+    parsedFields[field] = updatedValue;
+
+    const updateData = {
+      fields: JSON.stringify(parsedFields),
+    };
+
+    // Also update explicit column if field maps to a table column
+    if (field in document) {
+      updateData[field] = updatedValue;
+    }
+
+    const updatedDocument = await prisma.document.update({
+      where: { id },
+      data: updateData,
+    });
+
+    console.log(`[Document] Field "${field}" updated to "${updatedValue}" for doc id=${id}`);
+    return successResponse(res, updatedDocument, `Field "${field}" updated successfully`, 200);
+
+  } catch (error) {
+    console.error('[DOC_CORRECTION] Error:', error);
+    return errorResponse(res, 'Failed to update document field: ' + error.message, 500);
+  }
+};
+
 module.exports = {
   createDocument,
   getDocuments,
@@ -317,4 +409,5 @@ module.exports = {
   deleteDocument,
   getExpiryReminders,
   getDocumentImage,
+  correctDocumentField,
 };

@@ -24,7 +24,7 @@ import { Input } from '../../components/common/Input';
 import { useAuth } from '../../context/AuthContext';
 import { pdfService } from '../../services/pdf/pdfService';
 
-export const DocumentsScreen: React.FC = () => {
+export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
   const { user } = useAuth();
   const [documents, setDocuments] = useState<DocumentMetadata[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -500,16 +500,39 @@ export const DocumentsScreen: React.FC = () => {
                     {/* Edit & Delete Actions */}
                     <View style={styles.modalActionsRow}>
                       <Button
-                        title="✏️ Edit Info"
+                        title="🤖 Ask AI"
+                        onPress={() => {
+                          const doc = selectedDoc;
+                          setSelectedDoc(null);
+                          let fieldsObj = {};
+                          if (doc.fields) {
+                            try {
+                              fieldsObj = typeof doc.fields === 'string' ? JSON.parse(doc.fields) : doc.fields;
+                            } catch (e) {
+                              fieldsObj = {};
+                            }
+                          }
+                          navigation?.navigate?.('Assistant', {
+                            documentId: doc.id,
+                            documentType: doc.documentType,
+                            documentName: doc.documentName,
+                            extractedFields: fieldsObj,
+                          });
+                        }}
+                        variant="primary"
+                        style={{ flex: 1, marginRight: 4 }}
+                      />
+                      <Button
+                        title="✏️ Edit"
                         onPress={() => setIsEditMode(true)}
                         variant="outlined"
-                        style={{ flex: 1, marginRight: 6 }}
+                        style={{ flex: 1, marginHorizontal: 3 }}
                       />
                       <Button
                         title="🗑️ Delete"
                         onPress={() => handleDeleteDoc(selectedDoc)}
                         variant="outlined"
-                        style={{ flex: 1, marginLeft: 6 }}
+                        style={{ flex: 1, marginLeft: 4 }}
                       />
                     </View>
                   </View>

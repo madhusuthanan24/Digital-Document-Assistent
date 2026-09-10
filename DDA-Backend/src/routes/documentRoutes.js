@@ -8,6 +8,7 @@ const {
   deleteDocument,
   getExpiryReminders,
   getDocumentImage,
+  correctDocumentField,
 } = require('../controllers/documentController');
 const authMiddleware = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware');
@@ -16,6 +17,7 @@ router.use(authMiddleware);
 
 router.get('/reminders/expiry', getExpiryReminders);
 router.get('/:id/image', getDocumentImage);
+router.post('/:id/correction', correctDocumentField);
 router.post('/', upload.single('file'), createDocument);
 router.get('/', getDocuments);
 router.get('/:id', getDocumentById);

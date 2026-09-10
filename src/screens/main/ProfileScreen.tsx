@@ -5,12 +5,13 @@ import {
   StyleSheet,
   ScrollView,
   Alert,
+  TouchableOpacity,
 } from 'react-native';
 import { theme } from '../../constants/theme';
 import { Button } from '../../components/common/Button';
 import { useAuth } from '../../context/AuthContext';
 
-export const ProfileScreen: React.FC = () => {
+export const ProfileScreen: React.FC<any> = ({ navigation }) => {
   const { user, logout } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
@@ -58,6 +59,27 @@ export const ProfileScreen: React.FC = () => {
         <View style={styles.verifiedBadge}>
           <Text style={styles.verifiedText}>✓  Firebase Authenticated</Text>
         </View>
+      </View>
+
+      {/* AI Assistant Card */}
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>🤖 AI Document Assistant</Text>
+        <Text style={{ fontSize: 13, color: theme.colors.textSecondary, marginBottom: 12 }}>
+          Chat with your intelligent assistant to understand document fields, verify info, or request corrections.
+        </Text>
+        <TouchableOpacity
+          style={{
+            backgroundColor: theme.colors.primary,
+            paddingVertical: 12,
+            borderRadius: 8,
+            alignItems: 'center',
+          }}
+          onPress={() => navigation.navigate('Assistant', {})}
+        >
+          <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 14 }}>
+            Open AI Assistant
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {/* Account Info */}

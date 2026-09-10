@@ -3,6 +3,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { RootStackParamList } from './types';
 import { AuthNavigator } from './AuthNavigator';
 import { MainNavigator } from './MainNavigator';
+import { AssistantScreen } from '../screens/main/AssistantScreen';
 import { useAuth } from '../context/AuthContext';
 import { LoadingIndicator } from '../components/common/LoadingIndicator';
 
@@ -25,6 +26,7 @@ export const AppNavigator: React.FC = () => {
       ) : (
         <Stack.Screen name="Auth" component={AuthNavigator} />
       )}
+      <Stack.Screen name="Assistant" component={AssistantScreen} />
     </Stack.Navigator>
   );
 };

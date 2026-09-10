@@ -6,6 +6,7 @@ require('dotenv').config();
 const authRoutes = require('./routes/authRoutes');
 const documentRoutes = require('./routes/documentRoutes');
 const reminderRoutes = require('./routes/reminderRoutes');
+const assistantRoutes = require('./routes/assistantRoutes');
 const { errorResponse } = require('./utils/responseHandler');
 
 const app = express();
@@ -28,6 +29,7 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/reminders', reminderRoutes);
+app.use('/api/assistant', assistantRoutes);
 
 // 404 Handler
 app.use((req, res) => {
