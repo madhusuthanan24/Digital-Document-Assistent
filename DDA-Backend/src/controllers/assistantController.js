@@ -16,9 +16,15 @@ const SYSTEM_PROMPT = "You are the AI Document Assistant for Digital Document As
  * POST /api/assistant/chat
  */
 const processChatMessage = async (req, res) => {
+  const reqReceivedTime = Date.now();
+  console.log(`[ASSISTANT_API] REQUEST_RECEIVED: ${new Date(reqReceivedTime).toISOString()}`);
+
   try {
     const userId = req.user?.userId || req.user?.id || req.headers['x-user-id'];
     const { message, documentId, conversationHistory = [] } = req.body;
+
+    const authTime = Date.now();
+    console.log(`[ASSISTANT_API] AUTH_COMPLETE: ${new Date(authTime).toISOString()} (+${authTime - reqReceivedTime}ms)`);
 
     if (!userId) {
       return errorResponse(res, 'Authentication required', 401);
@@ -91,7 +97,8 @@ const processChatMessage = async (req, res) => {
 
     const apiKey = process.env.NVIDIA_API_KEY || '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';
 
-    console.log("[Assistant] Sending chat query (User: " + userId + ", DocContext: " + (documentId || 'None') + ")");
+    const aiReqStart = Date.now();
+    console.log(`[ASSISTANT_API] AI_REQUEST_START: ${new Date(aiReqStart).toISOString()} (User: ${userId}, DocContext: ${documentId || 'None'})`);
 
     const aiRes = await fetch(NVIDIA_ENDPOINT, {
       method: 'POST',
@@ -108,6 +115,9 @@ const processChatMessage = async (req, res) => {
       }),
     });
 
+    const aiResTime = Date.now();
+    console.log(`[ASSISTANT_API] AI_RESPONSE_RECEIVED: ${new Date(aiResTime).toISOString()} (+${aiResTime - aiReqStart}ms, status ${aiRes.status})`);
+
     if (!aiRes.ok) {
       const errText = await aiRes.text();
       console.warn("[Assistant] NVIDIA API HTTP " + aiRes.status + ": " + errText.substring(0, 200));
@@ -122,7 +132,7 @@ const processChatMessage = async (req, res) => {
     const rawReply = aiData?.choices?.[0]?.message?.content || 'I could not generate a response. Please try again.';
 
     let proposal = null;
-    const jsonMatch = rawReply.match(/```jsons*([sS]*?)s*``/) || rawReply.match(/({[sS]*?"type"s*:s*"correction_proposal"[sS]*?})/);
+    const jsonMatch = rawReply.match(/```json\s*([\s\S]*?)\s*```/) || rawReply.match(/(\{[\s\S]*?"type"\s*:\s*"correction_proposal"[\s\S]*?\})/);
 
     if (jsonMatch) {
       try {
@@ -135,10 +145,14 @@ const processChatMessage = async (req, res) => {
       }
     }
 
-    let cleanReply = rawReply.replace(/```json[sS]*?```/g, '').trim();
+    let cleanReply = rawReply.replace(/```json[\s\S]*?```/g, '').trim();
     if (!cleanReply && proposal) {
       cleanReply = "I have created a correction proposal to update your document's " + proposal.field + " to \"" + proposal.proposedValue + "\". Please review and confirm the change below.";
     }
+
+    const resSentTime = Date.now();
+    console.log(`[ASSISTANT_API] RESPONSE_SENT: ${new Date(resSentTime).toISOString()}`);
+    console.log(`[ASSISTANT_API] TOTAL_TIME_MS: ${resSentTime - reqReceivedTime}ms`);
 
     return successResponse(res, {
       reply: cleanReply,
@@ -147,7 +161,8 @@ const processChatMessage = async (req, res) => {
     }, 'Chat response generated');
 
   } catch (error) {
-    console.error('[ASSISTANT_ERROR]', error);
+    const errTime = Date.now();
+    console.error(`[ASSISTANT_API] ERROR (+${errTime - reqReceivedTime}ms):`, error);
     return successResponse(
       res,
       { reply: 'AI Assistant is temporarily unavailable. Please try again.', proposal: null },

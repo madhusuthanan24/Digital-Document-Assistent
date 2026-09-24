@@ -16,4 +16,10 @@ export type MainTabParamList = {
 export type RootStackParamList = {
   Auth: undefined;
   Main: undefined;
+  Assistant?: {
+    documentId?: string;
+    documentType?: string;
+    documentName?: string;
+    extractedFields?: Record<string, string>;
+  };
 };

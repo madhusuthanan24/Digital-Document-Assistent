@@ -245,13 +245,34 @@ class PdfService {
     try {
       const ExpoSharing = require('expo-sharing');
       if (ExpoSharing && ExpoSharing.shareAsync) {
-        console.log('[PDF Log 4.2] Invoking expo-sharing.shareAsync with mimeType application/pdf');
-        await ExpoSharing.shareAsync(tempPdfUri, {
+        let readableUri = tempPdfUri;
+        try {
+          const LegacyFS = require('expo-file-system/legacy');
+          const cacheDir = LegacyFS.cacheDirectory || LegacyFS.documentDirectory;
+          if (cacheDir && LegacyFS.copyAsync) {
+            const sanitizedName = doc.documentName.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const destUri = `${cacheDir}${Date.now()}_${sanitizedName}.pdf`;
+            console.log(`[PDF SHARE] SOURCE_URI: ${tempPdfUri}`);
+            console.log(`[PDF SHARE] DESTINATION_URI: ${destUri}`);
+            await LegacyFS.copyAsync({ from: tempPdfUri, to: destUri });
+            if (LegacyFS.getInfoAsync) {
+              const info = await LegacyFS.getInfoAsync(destUri);
+              console.log(`[PDF SHARE] DESTINATION_EXISTS: ${info.exists}`);
+              console.log(`[PDF SHARE] DESTINATION_SIZE: ${info.exists ? info.size : 0}`);
+            }
+            readableUri = destUri;
+          }
+        } catch (copyErr) {
+          console.warn('[PDF SHARE] Copy to cache warning:', copyErr);
+        }
+
+        console.log('[PDF SHARE] SHARE_START: Invoking expo-sharing.shareAsync with mimeType application/pdf');
+        await ExpoSharing.shareAsync(readableUri, {
           mimeType: 'application/pdf',
           dialogTitle: `Share ${doc.documentName} PDF`,
           UTI: 'com.adobe.pdf',
         });
-        console.log('[PDF Log 4.3] Native share dialog completed');
+        console.log('[PDF SHARE] SHARE_SUCCESS: Native share dialog completed');
         return;
       }
     } catch (expoShareErr) {

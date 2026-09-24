@@ -69,6 +69,9 @@ export const AssistantScreen: React.FC<AssistantScreenProps> = ({ navigation, ro
     if (!inputMessage.trim() || isLoading) return;
     setErrorMsg(null);
 
+    const sendStartTime = Date.now();
+    console.log(`[ASSISTANT] SEND_START: ${new Date(sendStartTime).toISOString()}`);
+
     const userText = inputMessage.trim();
     setInputMessage('');
 
@@ -96,6 +99,9 @@ export const AssistantScreen: React.FC<AssistantScreenProps> = ({ navigation, ro
     });
 
     setIsLoading(false);
+
+    const finishTime = Date.now();
+    console.log(`[ASSISTANT] TOTAL_TIME_MS: ${finishTime - sendStartTime}ms`);
 
     if (response.reply) {
       const aiMsg: ChatMessage = {

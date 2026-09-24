@@ -63,19 +63,52 @@ function logStage(msg: string) { console.log(`[OCR] ${msg}`); }
 function logError(stage: string, msg: string) { console.warn(`[OCR][${stage}] ${msg}`); }
 
 // ---------------------------------------------------------------------------
-// Base64 Conversion — expo-file-system → fetch+FileReader
+// Base64 Conversion — 4-Tier Resolution & Sanitization Strategy
 // ---------------------------------------------------------------------------
+export function sanitizeBase64(rawB64: string): string {
+  if (!rawB64) return '';
+  let cleaned = rawB64.trim();
+  while (cleaned.includes(',')) {
+    cleaned = cleaned.split(',').pop()!.trim();
+  }
+  cleaned = cleaned.replace(/^data:image\/[a-z]+;base64,/i, '');
+  return cleaned.trim();
+}
+
 async function uriToBase64(uri: string): Promise<string> {
+  // Tier 1: Modern Expo SDK 57 File API
+  try {
+    const ExpoFS = require('expo-file-system');
+    if (ExpoFS?.File) {
+      const file = new ExpoFS.File(uri);
+      const b64 = await file.base64();
+      if (b64 && b64.length > 0) return sanitizeBase64(b64);
+    }
+  } catch { /* continue */ }
+
+  // Tier 2: Expo SDK 57 legacy API
+  try {
+    const LegacyFS = require('expo-file-system/legacy');
+    if (LegacyFS?.readAsStringAsync) {
+      const b64 = await LegacyFS.readAsStringAsync(uri, {
+        encoding: LegacyFS.EncodingType?.Base64 || 'base64',
+      });
+      if (b64 && b64.length > 0) return sanitizeBase64(b64);
+    }
+  } catch { /* continue */ }
+
+  // Tier 3: Classic expo-file-system
   try {
     const ExpoFS = require('expo-file-system');
     if (ExpoFS?.readAsStringAsync) {
       const b64 = await ExpoFS.readAsStringAsync(uri, {
         encoding: ExpoFS.EncodingType?.Base64 || 'base64',
       });
-      if (b64 && b64.length > 0) return b64;
+      if (b64 && b64.length > 0) return sanitizeBase64(b64);
     }
   } catch { /* continue */ }
 
+  // Tier 4: Fetch + FileReader (Web / Fallback)
   try {
     const response = await fetch(uri);
     const blob = await response.blob();
@@ -83,7 +116,7 @@ async function uriToBase64(uri: string): Promise<string> {
       const reader = new FileReader();
       reader.onloadend = () => {
         const dataUrl = reader.result as string;
-        resolve(dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl);
+        resolve(sanitizeBase64(dataUrl));
       };
       reader.onerror = reject;
       reader.readAsDataURL(blob);
@@ -349,13 +382,14 @@ async function callNvidiaApiWithBackoff(
   maxRetries = 3,
   temperature?: number
 ): Promise<string> {
+  const cleanB64 = sanitizeBase64(base64Image);
   const body = {
     model: NVIDIA_MODEL,
     messages: [{
       role: 'user',
       content: [
         { type: 'text', text: prompt },
-        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${cleanB64}` } },
       ],
     }],
     temperature: temperature ?? NVIDIA_CONFIG.temperature,
@@ -459,8 +493,16 @@ export async function extractDocumentDetails(
     ` transforms=[${prep.appliedTransforms.join(', ')}]`
   );
 
-  const base64Image = await uriToBase64(prep.uri);
-  logStage(`Base64 ready (length=${base64Image.length.toLocaleString()})`);
+  const rawBase64 = await uriToBase64(prep.uri);
+  const base64Image = sanitizeBase64(rawBase64);
+  const base64Prefix = base64Image.substring(0, 30);
+  logStage(`Base64 ready (length=${base64Image.length.toLocaleString()}, prefix="${base64Prefix}")`);
+  console.log(`[OCR][IMAGE] URI: ${prep.uri}`);
+  console.log(`[OCR][IMAGE] MIME TYPE: image/jpeg`);
+  console.log(`[OCR][IMAGE] BASE64 LENGTH: ${base64Image.length}`);
+  console.log(`[OCR][IMAGE] BASE64 PREFIX: ${base64Prefix}`);
+  console.log(`[OCR][IMAGE] FILE SIZE: ~${Math.round(base64Image.length * 0.75 / 1024)} KB`);
+  console.log(`[OCR][IMAGE] DIMENSIONS: ${prep.width}x${prep.height}`);
 
   // ── Stage 2.5: Image Quality Analysis ────────────────────────────────────
   const imageQuality = analyzeImageQuality(

@@ -18,6 +18,9 @@
  *  6. Coordinate Conversion & Pixel-Accurate Crop via @react-native-community/image-editor.
  */
 
+declare const atob: any;
+declare const Buffer: any;
+
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import {
   View,
@@ -439,12 +442,11 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
     try {
       const current = cropRectRef.current || cropRect;
       const { offsetX: ox, offsetY: oy, displayW: dW, displayH: dH } = layoutRef.current;
-
       // 1. Convert container cropRect into display image space (subtract ox and oy)
-      const cropImageX = Math.max(0, current.left - ox);
-      const cropImageY = Math.max(0, current.top - oy);
-      const cropImageRight = Math.min(dW, current.right - ox);
-      const cropImageBottom = Math.min(dH, current.bottom - oy);
+      const cropImageX = Math.max(0, Math.min(dW, current.left - ox));
+      const cropImageY = Math.max(0, Math.min(dH, current.top - oy));
+      const cropImageRight = Math.max(0, Math.min(dW, current.right - ox));
+      const cropImageBottom = Math.max(0, Math.min(dH, current.bottom - oy));
 
       const cropImageW = Math.max(0, cropImageRight - cropImageX);
       const cropImageH = Math.max(0, cropImageBottom - cropImageY);
@@ -462,61 +464,41 @@ export const ManualCropScreen: React.FC<ManualCropScreenProps> = ({
       }
 
       // 4. Convert display-space crop into visual pixel space
-      let pixelX = Math.max(0, Math.round(cropImageX * scaleX));
-      let pixelY = Math.max(0, Math.round(cropImageY * scaleY));
+      let pixelX = Math.max(0, Math.min(Math.round(cropImageX * scaleX), visualWidth - 1));
+      let pixelY = Math.max(0, Math.min(Math.round(cropImageY * scaleY), visualHeight - 1));
       let pixelW = Math.max(1, Math.round(cropImageW * scaleX));
       let pixelH = Math.max(1, Math.round(cropImageH * scaleY));
 
-      // 5. Clamp to visual bitmap boundaries
-      pixelX = Math.max(0, Math.min(pixelX, visualWidth - 1));
-      pixelY = Math.max(0, Math.min(pixelY, visualHeight - 1));
-      pixelW = Math.max(1, Math.min(pixelW, visualWidth - pixelX));
-      pixelH = Math.max(1, Math.min(pixelH, visualHeight - pixelY));
-
-      // 6. User UI rotation mapping
-      let finalOrigX = pixelX;
-      let finalOrigY = pixelY;
-      let finalOrigW = pixelW;
-      let finalOrigH = pixelH;
-
-      if (rotation === 90) {
-        finalOrigX = pixelY;
-        finalOrigY = rawImgH - pixelX - pixelW;
-        finalOrigW = pixelH;
-        finalOrigH = pixelW;
-      } else if (rotation === 180) {
-        finalOrigX = rawImgW - pixelX - pixelW;
-        finalOrigY = rawImgH - pixelY - pixelH;
-        finalOrigW = pixelW;
-        finalOrigH = pixelH;
-      } else if (rotation === 270) {
-        finalOrigX = rawImgW - pixelY - pixelH;
-        finalOrigY = pixelX;
-        finalOrigW = pixelH;
-        finalOrigH = pixelW;
+      // 5. Precise Boundary Alignment (guarantee x + width <= visualWidth and y + height <= visualHeight)
+      if (pixelX + pixelW > visualWidth) {
+        pixelW = Math.max(1, visualWidth - pixelX);
       }
 
-      finalOrigX = Math.max(0, Math.min(finalOrigX, rawW - 1));
-      finalOrigY = Math.max(0, Math.min(finalOrigY, rawH - 1));
-      finalOrigW = Math.max(1, Math.min(finalOrigW, rawW - finalOrigX));
-      finalOrigH = Math.max(1, Math.min(finalOrigH, rawH - finalOrigY));
+      if (pixelY + pixelH > visualHeight) {
+        pixelH = Math.max(1, visualHeight - pixelY);
+      }
 
-      // 7. Temporary verbose debug logging as required
-      console.log(`[MANUAL CROP DEBUG]
-raw dimensions: ${rawW}x${rawH}
+      // Diagnostic Logging
+      console.log(`[MANUAL CROP DIAGNOSTIC]
+source URI: ${imageUri}
+source bitmap size (raw): ${rawW}x${rawH}
 EXIF orientation: ${exifOrientation}
-visual dimensions: ${visualWidth}x${visualHeight}
-container: ${containerW}x${containerH}
-display: ${dW.toFixed(1)}x${dH.toFixed(1)}
-offset: ${ox.toFixed(1)},${oy.toFixed(1)}
-cropRect: ${current.left.toFixed(1)},${current.top.toFixed(1)},${current.right.toFixed(1)},${current.bottom.toFixed(1)}
-image-space crop: ${cropImageX.toFixed(1)},${cropImageY.toFixed(1)},${cropImageW.toFixed(1)},${cropImageH.toFixed(1)}
-pixel crop: ${finalOrigX},${finalOrigY},${finalOrigW},${finalOrigH}
-scale: ${scaleX.toFixed(4)},${scaleY.toFixed(4)}`);
+visual upright size: ${visualWidth}x${visualHeight}
+container size: ${containerW}x${containerH}
+displayed image size: ${dW.toFixed(1)}x${dH.toFixed(1)}
+displayed offset: ox=${ox.toFixed(1)}, oy=${oy.toFixed(1)}
+crop handles (display): left=${current.left.toFixed(1)}, top=${current.top.toFixed(1)}, right=${current.right.toFixed(1)}, bottom=${current.bottom.toFixed(1)}
+image-space crop: x=${cropImageX.toFixed(1)}, y=${cropImageY.toFixed(1)}, w=${cropImageW.toFixed(1)}, h=${cropImageH.toFixed(1)}
+scaleX: ${scaleX.toFixed(6)}, scaleY: ${scaleY.toFixed(6)}
+NATIVE:
+bitmap = ${visualWidth}x${visualHeight}
+crop = x:${pixelX}, y:${pixelY}, width:${pixelW}, height:${pixelH}
+right = ${pixelX + pixelW} (limit: ${visualWidth})
+bottom = ${pixelY + pixelH} (limit: ${visualHeight})`);
 
       const cropResult = await ImageEditor.cropImage(imageUri, {
-        offset: { x: finalOrigX, y: finalOrigY },
-        size: { width: finalOrigW, height: finalOrigH },
+        offset: { x: pixelX, y: pixelY },
+        size: { width: pixelW, height: pixelH },
         quality: 0.92,
         format: 'jpeg',
       });
@@ -529,16 +511,16 @@ scale: ${scaleX.toFixed(4)},${scaleY.toFixed(4)}`);
         const cleanSourcePath = cropResult.uri.replace('file://', '');
         await RNFS.copyFile(cleanSourcePath, destPath);
         finalSavedUri = `file://${destPath}`;
-      } catch (copyErr) {
-        console.warn('[Crop] Copy to persistent file skipped:', copyErr);
+      } catch (fileErr) {
+        console.warn('[CropScreen] Cache copy warning:', fileErr);
       }
 
-      console.log(`[Crop] Cropped image URI: ${finalSavedUri}`);
+      console.log(`[CropScreen] Native cropped image saved: ${finalSavedUri}`);
 
       onCrop({
         uri: finalSavedUri,
-        width: cropResult.width || finalOrigW,
-        height: cropResult.height || finalOrigH,
+        width: cropResult.width || pixelW,
+        height: cropResult.height || pixelH,
       });
     } catch (err: any) {
       console.error('[Crop] Error executing crop:', err);

@@ -15,7 +15,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { readAsStringAsync, writeAsStringAsync, EncodingType, cacheDirectory, downloadAsync, StorageAccessFramework } from 'expo-file-system/legacy';
+import { readAsStringAsync, writeAsStringAsync, EncodingType, cacheDirectory, documentDirectory, downloadAsync, StorageAccessFramework, copyAsync, getInfoAsync } from 'expo-file-system/legacy';
 import { theme } from '../../constants/theme';
 import { documentService } from '../../services/document/documentService';
 import { DocumentCategory, DocumentMetadata } from '../../types/document';
@@ -294,6 +294,28 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     return uri;
   };
 
+  const prepareLocalPdfFile = async (rawPdfUri: string, fileName: string): Promise<string> => {
+    console.log(`[PDF SHARE] SOURCE_URI: ${rawPdfUri}`);
+    const baseDir = cacheDirectory || documentDirectory;
+    const destUri = `${baseDir}${Date.now()}_${fileName}`;
+    console.log(`[PDF SHARE] DESTINATION_URI: ${destUri}`);
+
+    await copyAsync({ from: rawPdfUri, to: destUri });
+
+    const info = await getInfoAsync(destUri);
+    const exists = info.exists;
+    const size = info.exists ? (info as any).size ?? 0 : 0;
+
+    console.log(`[PDF SHARE] DESTINATION_EXISTS: ${exists}`);
+    console.log(`[PDF SHARE] DESTINATION_SIZE: ${size}`);
+
+    if (!exists || size === 0) {
+      throw new Error(`Copied PDF file is invalid or empty at ${destUri}`);
+    }
+
+    return destUri;
+  };
+
   const handleSavePdf = async () => {
     if (!selectedDoc) return;
     console.log(`[PDF Log 2] handleSavePdf triggered for: ${selectedDoc.documentName}`);
@@ -305,12 +327,14 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
         setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
       );
 
-      const pdfUri = await Promise.race([pdfPromise, timeoutPromise]);
-      console.log(`[PDF Log 2.1] PDF URI generated for save: ${pdfUri}`);
+      const rawPdfUri = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 2.1] Raw PDF URI generated for save: ${rawPdfUri}`);
 
       const sanitizedDocNumber = (selectedDoc.documentNumber || 'Document').replace(/[^a-zA-Z0-9_-]/g, '_');
       const sanitizedDocType = selectedDoc.documentType.replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `${sanitizedDocType}_${sanitizedDocNumber}.pdf`;
+
+      const localPdfUri = await prepareLocalPdfFile(rawPdfUri, fileName);
 
       if (Platform.OS === 'android' && StorageAccessFramework) {
         try {
@@ -319,7 +343,7 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
           const permissions = await saf.requestDirectoryPermissionsAsync();
           if (permissions.granted) {
             console.log('[PDF Log 2.3] Directory permissions granted. Writing file.');
-            const base64Data = await readAsStringAsync(pdfUri, { encoding: EncodingType.Base64 });
+            const base64Data = await readAsStringAsync(localPdfUri, { encoding: EncodingType.Base64 });
             const newFileUri = await saf.createFileAsync(
               permissions.directoryUri,
               fileName,
@@ -336,11 +360,12 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
       }
 
       if (await Sharing.isAvailableAsync()) {
-        console.log('[PDF Log 2.6] Using Sharing dialog to save PDF');
-        await Sharing.shareAsync(pdfUri, { mimeType: 'application/pdf', dialogTitle: `Save ${fileName}` });
+        console.log('[PDF SHARE] SHARE_START: Using Sharing dialog to save PDF');
+        await Sharing.shareAsync(localPdfUri, { mimeType: 'application/pdf', dialogTitle: `Save ${fileName}` });
+        console.log('[PDF SHARE] SHARE_SUCCESS: PDF saved via Sharing dialog');
         Alert.alert('PDF Saved', 'PDF file ready and saved successfully.');
       } else {
-        Alert.alert('PDF Saved', `PDF file generated successfully at ${pdfUri}`);
+        Alert.alert('PDF Saved', `PDF file generated successfully at ${localPdfUri}`);
       }
     } catch (err: any) {
       console.error('[PDF Log 2.7] handleSavePdf error:', err);
@@ -361,17 +386,23 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
         setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
       );
 
-      const pdfUri = await Promise.race([pdfPromise, timeoutPromise]);
-      console.log(`[PDF Log 3.1] PDF URI generated for sharing: ${pdfUri}`);
+      const rawPdfUri = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 3.1] Raw PDF URI generated for sharing: ${rawPdfUri}`);
+
+      const sanitizedDocNumber = (selectedDoc.documentNumber || 'Document').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const sanitizedDocType = selectedDoc.documentType.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const fileName = `${sanitizedDocType}_${sanitizedDocNumber}.pdf`;
+
+      const localPdfUri = await prepareLocalPdfFile(rawPdfUri, fileName);
 
       if (await Sharing.isAvailableAsync()) {
-        console.log('[PDF Log 3.2] Launching native Share sheet with mimeType application/pdf');
-        await Sharing.shareAsync(pdfUri, {
+        console.log('[PDF SHARE] SHARE_START: Launching native Share sheet with mimeType application/pdf');
+        await Sharing.shareAsync(localPdfUri, {
           mimeType: 'application/pdf',
           dialogTitle: `Share ${selectedDoc.documentName} PDF`,
           UTI: 'com.adobe.pdf',
         });
-        console.log('[PDF Log 3.3] Share sheet launched successfully');
+        console.log('[PDF SHARE] SHARE_SUCCESS: Share sheet launched successfully');
       } else {
         Alert.alert('Sharing Unavailable', 'Native sharing is not supported on this device.');
       }

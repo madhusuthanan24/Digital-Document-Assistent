@@ -28,6 +28,9 @@
  *  [OCR] Final image selected: <version>
  */
 
+declare const atob: any;
+declare const Buffer: any;
+
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system';
 
@@ -191,11 +194,26 @@ export function parseExifOrientation(bytes: Uint8Array): OrientationInfo {
 
 async function detectImageOrientation(uri: string): Promise<OrientationInfo> {
   try {
-    const base64Chunk = await FileSystem.readAsStringAsync(uri, {
-      encoding: (FileSystem as any).EncodingType?.Base64 || 'base64',
-      length: 65536,
-      position: 0,
-    });
+    let base64Chunk = '';
+    try {
+      const LegacyFS = require('expo-file-system/legacy');
+      if (LegacyFS?.readAsStringAsync) {
+        base64Chunk = await LegacyFS.readAsStringAsync(uri, {
+          encoding: LegacyFS.EncodingType?.Base64 || 'base64',
+          length: 65536,
+          position: 0,
+        });
+      }
+    } catch { /* fallback to standard FileSystem */ }
+
+    if (!base64Chunk && FileSystem?.readAsStringAsync) {
+      base64Chunk = await FileSystem.readAsStringAsync(uri, {
+        encoding: (FileSystem as any).EncodingType?.Base64 || 'base64',
+        length: 65536,
+        position: 0,
+      });
+    }
+
     if (base64Chunk) {
       const binaryStr = typeof atob === 'function' ? atob(base64Chunk) : Buffer.from(base64Chunk, 'base64').toString('binary');
       const bytes = new Uint8Array(binaryStr.length);
