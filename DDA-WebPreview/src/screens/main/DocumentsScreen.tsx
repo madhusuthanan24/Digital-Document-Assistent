@@ -19,6 +19,7 @@ import { readAsStringAsync, writeAsStringAsync, EncodingType, cacheDirectory, do
 import { theme } from '../../constants/theme';
 import { documentService } from '../../services/document/documentService';
 import { DocumentCategory, DocumentMetadata } from '../../types/document';
+import { DOCUMENT_TEMPLATES, categoryToTemplateKey } from '../../templates/documentTemplates';
 import { LoadingIndicator } from '../../components/common/LoadingIndicator';
 import { EmptyState } from '../../components/common/EmptyState';
 import { Button } from '../../components/common/Button';
@@ -26,6 +27,16 @@ import { Input } from '../../components/common/Input';
 import { useAuth } from '../../context/AuthContext';
 
 const { width } = Dimensions.get('window');
+
+interface EditableFieldItem {
+  key: string;
+  label: string;
+  value: string;
+  placeholder?: string;
+  required?: boolean;
+  isRemovable?: boolean;
+  multiline?: boolean;
+}
 
 export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
   const { user } = useAuth();
@@ -39,10 +50,10 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
   const [selectedDoc, setSelectedDoc] = useState<DocumentMetadata | null>(null);
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [editName, setEditName] = useState<string>('');
-  const [editType, setEditType] = useState<DocumentCategory>('Other');
-  const [editNumber, setEditNumber] = useState<string>('');
-  const [editIssueDate, setEditIssueDate] = useState<string>('');
-  const [editExpiryDate, setEditExpiryDate] = useState<string>('');
+  const [editFormValues, setEditFormValues] = useState<Record<string, string>>({});
+  const [isAddingField, setIsAddingField] = useState<boolean>(false);
+  const [newFieldKey, setNewFieldKey] = useState<string>('');
+  const [newFieldValue, setNewFieldValue] = useState<string>('');
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
 
@@ -82,19 +93,245 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     }, [fetchDocs])
   );
 
+  const resolveTemplateKey = (category: string, docName?: string): string | undefined => {
+    const normalizedCategory = category === 'VoterID' ? 'Voter ID' : category;
+    const mapped = categoryToTemplateKey(normalizedCategory);
+    if (mapped && DOCUMENT_TEMPLATES[mapped]) return mapped;
+    if (DOCUMENT_TEMPLATES[category]) return category;
+    if (docName && DOCUMENT_TEMPLATES[docName]) return docName;
+    return undefined;
+  };
+
+  const buildInitialFormValues = (doc: DocumentMetadata): Record<string, string> => {
+    const values: Record<string, string> = {};
+
+    // 1. Populate all saved dynamic fields from doc.fields
+    if (doc.fields && typeof doc.fields === 'object') {
+      for (const [k, v] of Object.entries(doc.fields)) {
+        if (v !== undefined && v !== null && String(v).trim()) {
+          values[k] = String(v).trim();
+        }
+      }
+    }
+
+    const templateKey = resolveTemplateKey(doc.documentType, doc.documentName);
+    const template = templateKey ? DOCUMENT_TEMPLATES[templateKey] : undefined;
+
+    if (template) {
+      // 2. Pre-populate template fields from matching doc attributes if not in fields
+      for (const f of template.fields) {
+        const existingKey = Object.keys(values).find(k => k.toLowerCase() === f.key.toLowerCase());
+        if (!existingKey || !values[existingKey]) {
+          let valFromRoot = '';
+          const lk = f.key.toLowerCase();
+          if (
+            lk.includes('number') ||
+            lk.includes('epic') ||
+            lk.includes('licence') ||
+            lk.includes('policy') ||
+            lk.includes('registration') ||
+            lk.includes('roll') ||
+            lk.includes('account')
+          ) {
+            valFromRoot = doc.documentNumber || '';
+          } else if (
+            lk === 'name' ||
+            lk.includes('holder') ||
+            lk.includes('owner') ||
+            lk.includes('student') ||
+            lk.includes('patient')
+          ) {
+            valFromRoot = doc.name || '';
+          } else if (
+            lk.includes('father') ||
+            lk.includes('husband') ||
+            lk.includes('guardian') ||
+            lk.includes('relative')
+          ) {
+            valFromRoot = doc.fatherName || '';
+          } else if (lk === 'gender' || lk === 'sex') {
+            valFromRoot = doc.gender || '';
+          } else if (lk.includes('birth') || lk === 'dob') {
+            valFromRoot = doc.dateOfBirth || '';
+          } else if (lk === 'address') {
+            valFromRoot = doc.address || '';
+          } else if (lk === 'issuedate') {
+            valFromRoot = doc.issueDate || '';
+          } else if (lk === 'expirydate') {
+            valFromRoot = doc.expiryDate || '';
+          }
+          if (valFromRoot) {
+            values[f.key] = valFromRoot;
+          }
+        }
+      }
+    } else {
+      // 3. For "Other" / Custom documents: ONLY add root properties if they contain non-empty saved data
+      if (doc.documentNumber && doc.documentNumber.trim() && !values['documentNumber']) {
+        values['documentNumber'] = doc.documentNumber.trim();
+      }
+      if (doc.name && doc.name.trim() && !values['name']) {
+        values['name'] = doc.name.trim();
+      }
+      if (doc.fatherName && doc.fatherName.trim() && !values['fatherName']) {
+        values['fatherName'] = doc.fatherName.trim();
+      }
+      if (doc.gender && doc.gender.trim() && !values['gender']) {
+        values['gender'] = doc.gender.trim();
+      }
+      if (doc.dateOfBirth && doc.dateOfBirth.trim() && !values['dateOfBirth']) {
+        values['dateOfBirth'] = doc.dateOfBirth.trim();
+      }
+      if (doc.address && doc.address.trim() && !values['address']) {
+        values['address'] = doc.address.trim();
+      }
+      if (doc.issueDate && doc.issueDate.trim() && !values['issueDate']) {
+        values['issueDate'] = doc.issueDate.trim();
+      }
+      if (doc.expiryDate && doc.expiryDate.trim() && !values['expiryDate']) {
+        values['expiryDate'] = doc.expiryDate.trim();
+      }
+    }
+
+    return values;
+  };
+
+  const getRenderedFields = (doc: DocumentMetadata, formValues: Record<string, string>): EditableFieldItem[] => {
+    const templateKey = resolveTemplateKey(doc.documentType, doc.documentName);
+    const template = templateKey ? DOCUMENT_TEMPLATES[templateKey] : undefined;
+
+    const fields: EditableFieldItem[] = [];
+    const usedKeys = new Set<string>();
+
+    if (template) {
+      // 1. Template fields in defined order
+      for (const tf of template.fields) {
+        usedKeys.add(tf.key.toLowerCase());
+        const matchingKey = Object.keys(formValues).find(k => k.toLowerCase() === tf.key.toLowerCase()) || tf.key;
+        const val = formValues[matchingKey] ?? '';
+
+        fields.push({
+          key: matchingKey,
+          label: tf.label,
+          value: val,
+          placeholder: `Enter ${tf.label.toLowerCase()}`,
+          required: tf.required,
+          isRemovable: false,
+          multiline: tf.key.toLowerCase().includes('address'),
+        });
+      }
+
+      // 2. Extra saved dynamic fields outside template
+      for (const [k, v] of Object.entries(formValues)) {
+        if (!usedKeys.has(k.toLowerCase())) {
+          usedKeys.add(k.toLowerCase());
+          const formattedLabel = k
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/_/g, ' ')
+            .replace(/^\w/, c => c.toUpperCase())
+            .trim();
+
+          fields.push({
+            key: k,
+            label: formattedLabel,
+            value: v || '',
+            placeholder: `Enter ${formattedLabel.toLowerCase()}`,
+            isRemovable: true,
+            multiline: k.toLowerCase().includes('address') || k.toLowerCase().includes('spec') || k.toLowerCase().includes('feature'),
+          });
+        }
+      }
+    } else {
+      // Custom / "Other" document: ONLY fields that actually exist in doc.fields or non-empty root properties
+      const keysOrder: string[] = [];
+
+      // Preserve doc.fields order first
+      if (doc.fields) {
+        for (const k of Object.keys(doc.fields)) {
+          if (!keysOrder.includes(k)) keysOrder.push(k);
+        }
+      }
+
+      // Include root props if they exist in formValues
+      const rootKeys = ['documentNumber', 'name', 'fatherName', 'gender', 'dateOfBirth', 'address', 'issueDate', 'expiryDate'];
+      for (const rk of rootKeys) {
+        if (formValues[rk] && !keysOrder.includes(rk)) {
+          keysOrder.push(rk);
+        }
+      }
+
+      // Include any other keys in formValues (e.g. newly added custom fields)
+      for (const k of Object.keys(formValues)) {
+        if (!keysOrder.includes(k)) {
+          keysOrder.push(k);
+        }
+      }
+
+      for (const k of keysOrder) {
+        const val = formValues[k] ?? '';
+        let label = k;
+        if (k === 'documentNumber') label = 'Document Number';
+        else if (k === 'name') label = 'Holder / Contact Name';
+        else if (k === 'fatherName') label = 'Father / Relative Name';
+        else if (k === 'gender') label = 'Gender';
+        else if (k === 'dateOfBirth') label = 'Date of Birth';
+        else if (k === 'address') label = 'Address';
+        else if (k === 'issueDate') label = 'Issue Date';
+        else if (k === 'expiryDate') label = 'Expiry Date';
+        else {
+          label = k
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/_/g, ' ')
+            .replace(/^\w/, c => c.toUpperCase())
+            .trim();
+        }
+
+        fields.push({
+          key: k,
+          label,
+          value: val,
+          placeholder: `Enter ${label.toLowerCase()}`,
+          isRemovable: true,
+          multiline: k.toLowerCase().includes('address') || k.toLowerCase().includes('spec') || k.toLowerCase().includes('feature'),
+        });
+      }
+    }
+
+    return fields;
+  };
+
   const handleOpenDocDetails = (doc: DocumentMetadata) => {
     setSelectedDoc(doc);
-    setEditName(doc.documentName);
-    setEditType(doc.documentType);
-    setEditNumber(doc.documentNumber);
-    setEditIssueDate(doc.issueDate || '');
-    setEditExpiryDate(doc.expiryDate || '');
+    const initialVals = buildInitialFormValues(doc);
+    setEditFormValues(initialVals);
+    setEditName(doc.documentName || '');
+    setIsAddingField(false);
+    setNewFieldKey('');
+    setNewFieldValue('');
+    setIsEditMode(false);
+
+    const rendered = getRenderedFields(doc, initialVals);
+    console.log(`[EDIT_DOC] Document ID: ${doc.id}`);
+    console.log(`[EDIT_DOC] Document type: ${doc.documentType}`);
+    console.log(`[EDIT_DOC] Saved fields: ${JSON.stringify(Object.keys(doc.fields || {}))}`);
+    console.log(`[EDIT_DOC] Fields rendered: ${rendered.map(f => f.key).join(', ')}`);
+  };
+
+  const handleCancelEdit = () => {
+    if (selectedDoc) {
+      setEditName(selectedDoc.documentName || '');
+      setEditFormValues(buildInitialFormValues(selectedDoc));
+    }
+    setIsAddingField(false);
+    setNewFieldKey('');
+    setNewFieldValue('');
     setIsEditMode(false);
   };
 
   const handleCloseModal = () => {
     setSelectedDoc(null);
     setIsEditMode(false);
+    setIsAddingField(false);
   };
 
   const handleSaveEdit = async () => {
@@ -104,18 +341,106 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
       return;
     }
 
+    // Document-specific validation
+    const aadhaarVal = editFormValues['aadhaarNumber'] || editFormValues['aadhaar'];
+    if (aadhaarVal && aadhaarVal.trim()) {
+      const digitsOnly = aadhaarVal.replace(/\s+/g, '');
+      if (!/^\d{12}$/.test(digitsOnly)) {
+        Alert.alert('Validation Error', 'Aadhaar Number must be a valid 12-digit number.');
+        return;
+      }
+    }
+
+    const panVal = editFormValues['panNumber'] || editFormValues['pan'];
+    if (panVal && panVal.trim()) {
+      if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/i.test(panVal.trim())) {
+        Alert.alert('Validation Error', 'PAN Number must be in the format ABCDE1234F.');
+        return;
+      }
+    }
+
+    console.log(`[DOCUMENT_EDIT] Save requested: ${selectedDoc.id}`);
     setIsSaving(true);
     try {
-      await documentService.updateDocument(user.uid, selectedDoc.id, {
-        documentName: editName.trim(),
-        documentType: editType,
-        documentNumber: editNumber.trim(),
-        issueDate: editIssueDate.trim(),
-        expiryDate: editExpiryDate.trim(),
-      });
+      const cleanFields: Record<string, string> = {};
+      for (const [k, v] of Object.entries(editFormValues)) {
+        const tk = k.trim();
+        const tv = typeof v === 'string' ? v.trim() : String(v || '').trim();
+        if (tk && tv && !/^[*_\-\s:]+$/.test(tv)) {
+          cleanFields[tk] = tv;
+        }
+      }
 
-      Alert.alert('Success', 'Document updated successfully.');
-      handleCloseModal();
+      const findFieldVal = (...keys: string[]): string | undefined => {
+        for (const k of keys) {
+          const matchingKey = Object.keys(cleanFields).find(ck => ck.toLowerCase() === k.toLowerCase());
+          if (matchingKey && cleanFields[matchingKey]) {
+            return cleanFields[matchingKey];
+          }
+        }
+        return undefined;
+      };
+
+      const docNumber = findFieldVal(
+        'documentNumber', 'aadhaarNumber', 'panNumber', 'passportNumber',
+        'epicNumber', 'voterIdNumber', 'licenceNumber', 'registrationNumber',
+        'policyNumber', 'rollNumber', 'accountNumber'
+      ) ?? selectedDoc.documentNumber ?? undefined;
+
+      const holderName = findFieldVal(
+        'name', 'fullName', 'holderName', 'ownerName', 'studentName', 'patientName', 'accountHolderName'
+      ) ?? selectedDoc.name ?? undefined;
+
+      const fatherName = findFieldVal(
+        'fatherName', 'husbandName', 'guardianName'
+      ) ?? selectedDoc.fatherName ?? undefined;
+
+      const gender = findFieldVal(
+        'gender', 'sex'
+      ) ?? selectedDoc.gender ?? undefined;
+
+      const dateOfBirth = findFieldVal(
+        'dateOfBirth', 'dob'
+      ) ?? selectedDoc.dateOfBirth ?? undefined;
+
+      const address = findFieldVal(
+        'address'
+      ) ?? selectedDoc.address ?? undefined;
+
+      const issueDate = findFieldVal(
+        'issueDate'
+      ) ?? selectedDoc.issueDate ?? undefined;
+
+      const expiryDate = findFieldVal(
+        'expiryDate'
+      ) ?? selectedDoc.expiryDate ?? undefined;
+
+      const updatePayload: Partial<DocumentMetadata> = {
+        documentName: editName.trim(),
+        documentType: selectedDoc.documentType,
+        documentNumber: docNumber,
+        name: holderName,
+        fatherName: fatherName,
+        gender: gender,
+        address: address,
+        dateOfBirth: dateOfBirth,
+        issueDate: issueDate,
+        expiryDate: expiryDate,
+        fields: Object.keys(cleanFields).length > 0 ? cleanFields : undefined,
+      };
+
+      await documentService.updateDocument(user.uid, selectedDoc.id, updatePayload);
+
+      const updatedDoc: DocumentMetadata = {
+        ...selectedDoc,
+        ...updatePayload,
+        fields: cleanFields,
+        updatedAt: new Date().toISOString(),
+      };
+      setSelectedDoc(updatedDoc);
+
+      Alert.alert('Saved', 'Document details updated successfully.');
+      setIsEditMode(false);
       fetchDocs();
     } catch (err: any) {
       Alert.alert('Update Failed', err?.message || 'Could not update document.');
@@ -228,7 +553,14 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
       .join('\n            ');
   };
 
-  const generatePdfFile = async (doc: DocumentMetadata): Promise<string> => {
+  interface GeneratedPdfResult {
+    rawUri: string;
+    localPdfUri: string;
+    base64Data: string;
+    fileName: string;
+  }
+
+  const generatePdfFile = async (doc: DocumentMetadata, fileName: string): Promise<GeneratedPdfResult> => {
     console.log(`[PDF Log 1] Generating PDF for: ${doc.documentName}`);
 
     // Prioritize cropped image path over original raw image
@@ -289,18 +621,37 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     `;
 
     console.log('[PDF Log 1.3] Calling Print.printToFileAsync for binary PDF');
-    const { uri } = await Print.printToFileAsync({ html: htmlContent });
-    console.log(`[PDF Log 1.4] Binary PDF generated successfully at URI: ${uri}`);
-    return uri;
-  };
+    const printResult = await Print.printToFileAsync({ html: htmlContent, base64: true });
+    const generatedUri = printResult.uri;
+    const uriScheme = generatedUri.includes(':') ? generatedUri.split(':')[0] : 'unknown';
+    const rawFilename = generatedUri.split('/').pop() || 'unknown';
 
-  const prepareLocalPdfFile = async (rawPdfUri: string, fileName: string): Promise<string> => {
-    console.log(`[PDF SHARE] SOURCE_URI: ${rawPdfUri}`);
+    console.log(`[PDF_DIAG] generated URI: ${generatedUri}`);
+    console.log(`[PDF_DIAG] URI scheme: ${uriScheme}`);
+    console.log(`[PDF_DIAG] filename: ${rawFilename}`);
+
+    try {
+      const sourceInfo = await getInfoAsync(generatedUri);
+      console.log(`[PDF_DIAG] source exists: ${sourceInfo.exists}`);
+      console.log(`[PDF_DIAG] source readable: ${sourceInfo.exists ? 'true' : 'false'}`);
+      console.log(`[PDF_DIAG] source size: ${sourceInfo.exists ? (sourceInfo as any).size ?? 0 : 0}`);
+    } catch (checkErr: any) {
+      console.log(`[PDF_DIAG] source exists: false`);
+      console.log(`[PDF_DIAG] source readable: false`);
+      console.log(`[PDF_DIAG] source size: 0`);
+    }
+
+    console.log(`[PDF SHARE] SOURCE_URI: ${generatedUri}`);
     const baseDir = cacheDirectory || documentDirectory;
     const destUri = `${baseDir}${Date.now()}_${fileName}`;
     console.log(`[PDF SHARE] DESTINATION_URI: ${destUri}`);
 
-    await copyAsync({ from: rawPdfUri, to: destUri });
+    const base64Data = printResult.base64 || '';
+    if (base64Data) {
+      await writeAsStringAsync(destUri, base64Data, { encoding: EncodingType.Base64 });
+    } else {
+      await copyAsync({ from: generatedUri, to: destUri });
+    }
 
     const info = await getInfoAsync(destUri);
     const exists = info.exists;
@@ -313,7 +664,12 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
       throw new Error(`Copied PDF file is invalid or empty at ${destUri}`);
     }
 
-    return destUri;
+    return {
+      rawUri: generatedUri,
+      localPdfUri: destUri,
+      base64Data,
+      fileName,
+    };
   };
 
   const handleSavePdf = async () => {
@@ -322,19 +678,17 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     setIsExporting(true);
 
     try {
-      const pdfPromise = generatePdfFile(selectedDoc);
-      const timeoutPromise = new Promise<string>((_, reject) =>
-        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
-      );
-
-      const rawPdfUri = await Promise.race([pdfPromise, timeoutPromise]);
-      console.log(`[PDF Log 2.1] Raw PDF URI generated for save: ${rawPdfUri}`);
-
       const sanitizedDocNumber = (selectedDoc.documentNumber || 'Document').replace(/[^a-zA-Z0-9_-]/g, '_');
       const sanitizedDocType = selectedDoc.documentType.replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `${sanitizedDocType}_${sanitizedDocNumber}.pdf`;
 
-      const localPdfUri = await prepareLocalPdfFile(rawPdfUri, fileName);
+      const pdfPromise = generatePdfFile(selectedDoc, fileName);
+      const timeoutPromise = new Promise<GeneratedPdfResult>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
+      );
+
+      const pdfResult = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 2.1] App-readable PDF URI ready for save: ${pdfResult.localPdfUri}`);
 
       if (Platform.OS === 'android' && StorageAccessFramework) {
         try {
@@ -343,13 +697,12 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
           const permissions = await saf.requestDirectoryPermissionsAsync();
           if (permissions.granted) {
             console.log('[PDF Log 2.3] Directory permissions granted. Writing file.');
-            const base64Data = await readAsStringAsync(localPdfUri, { encoding: EncodingType.Base64 });
             const newFileUri = await saf.createFileAsync(
               permissions.directoryUri,
               fileName,
               'application/pdf'
             );
-            await writeAsStringAsync(newFileUri, base64Data, { encoding: EncodingType.Base64 });
+            await writeAsStringAsync(newFileUri, pdfResult.base64Data, { encoding: EncodingType.Base64 });
             console.log(`[PDF Log 2.4] PDF saved successfully via SAF: ${newFileUri}`);
             Alert.alert('PDF Saved', `PDF saved successfully as "${fileName}".`);
             return;
@@ -361,11 +714,11 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
 
       if (await Sharing.isAvailableAsync()) {
         console.log('[PDF SHARE] SHARE_START: Using Sharing dialog to save PDF');
-        await Sharing.shareAsync(localPdfUri, { mimeType: 'application/pdf', dialogTitle: `Save ${fileName}` });
+        await Sharing.shareAsync(pdfResult.localPdfUri, { mimeType: 'application/pdf', dialogTitle: `Save ${fileName}` });
         console.log('[PDF SHARE] SHARE_SUCCESS: PDF saved via Sharing dialog');
         Alert.alert('PDF Saved', 'PDF file ready and saved successfully.');
       } else {
-        Alert.alert('PDF Saved', `PDF file generated successfully at ${localPdfUri}`);
+        Alert.alert('PDF Saved', `PDF file generated successfully at ${pdfResult.localPdfUri}`);
       }
     } catch (err: any) {
       console.error('[PDF Log 2.7] handleSavePdf error:', err);
@@ -381,23 +734,21 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     setIsExporting(true);
 
     try {
-      const pdfPromise = generatePdfFile(selectedDoc);
-      const timeoutPromise = new Promise<string>((_, reject) =>
-        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
-      );
-
-      const rawPdfUri = await Promise.race([pdfPromise, timeoutPromise]);
-      console.log(`[PDF Log 3.1] Raw PDF URI generated for sharing: ${rawPdfUri}`);
-
       const sanitizedDocNumber = (selectedDoc.documentNumber || 'Document').replace(/[^a-zA-Z0-9_-]/g, '_');
       const sanitizedDocType = selectedDoc.documentType.replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `${sanitizedDocType}_${sanitizedDocNumber}.pdf`;
 
-      const localPdfUri = await prepareLocalPdfFile(rawPdfUri, fileName);
+      const pdfPromise = generatePdfFile(selectedDoc, fileName);
+      const timeoutPromise = new Promise<GeneratedPdfResult>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
+      );
+
+      const pdfResult = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 3.1] App-readable PDF URI ready for sharing: ${pdfResult.localPdfUri}`);
 
       if (await Sharing.isAvailableAsync()) {
         console.log('[PDF SHARE] SHARE_START: Launching native Share sheet with mimeType application/pdf');
-        await Sharing.shareAsync(localPdfUri, {
+        await Sharing.shareAsync(pdfResult.localPdfUri, {
           mimeType: 'application/pdf',
           dialogTitle: `Share ${selectedDoc.documentName} PDF`,
           UTI: 'com.adobe.pdf',
@@ -725,7 +1076,16 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
                         />
                         <Button
                           title="✏️ Edit"
-                          onPress={() => setIsEditMode(true)}
+                          onPress={() => {
+                            setIsEditMode(true);
+                            if (selectedDoc) {
+                              const rendered = getRenderedFields(selectedDoc, editFormValues);
+                              console.log(`[EDIT_DOC] Document ID: ${selectedDoc.id}`);
+                              console.log(`[EDIT_DOC] Document type: ${selectedDoc.documentType}`);
+                              console.log(`[EDIT_DOC] Saved fields: ${JSON.stringify(Object.keys(selectedDoc.fields || {}))}`);
+                              console.log(`[EDIT_DOC] Fields rendered: ${rendered.map(f => f.key).join(', ')}`);
+                            }
+                          }}
                           variant="outlined"
                           style={{ flex: 1, marginHorizontal: 3 }}
                         />
@@ -739,53 +1099,121 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
                     </View>
                   </View>
                 ) : (
-                  // Edit Form View
+                  // Edit Form View — Dynamic Document-Specific Fields
                   <View>
                     <Input
-                      label="Document Name"
+                      label="Document Name *"
                       value={editName}
                       onChangeText={setEditName}
-                      placeholder="e.g. Voter ID Card"
+                      placeholder="e.g. My Document"
                     />
 
-                    <Text style={styles.fieldLabel}>Document Type</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
-                      {(['Aadhaar', 'PAN', 'VoterID', 'Passport', 'DrivingLicence', 'VehicleRC', 'Insurance', 'EducationalCertificate', 'Other'] as DocumentCategory[]).map((cat) => (
-                        <TouchableOpacity
-                          key={cat}
-                          style={[
-                            styles.chip,
-                            editType === cat && styles.chipSelected,
-                          ]}
-                          onPress={() => setEditType(cat)}
-                        >
-                          <Text style={[styles.chipText, editType === cat && styles.chipTextSelected]}>
-                            {cat}
-                          </Text>
-                        </TouchableOpacity>
+                    <View style={styles.fieldsSection}>
+                      <Text style={styles.fieldsSectionTitle}>
+                        {resolveTemplateKey(selectedDoc.documentType, selectedDoc.documentName)
+                          ? `${resolveTemplateKey(selectedDoc.documentType, selectedDoc.documentName)} Information`
+                          : 'Document Information'}
+                      </Text>
+
+                      {getRenderedFields(selectedDoc, editFormValues).map((field) => (
+                        <View key={field.key} style={styles.dynamicFieldRow}>
+                          <View style={styles.dynamicFieldHeader}>
+                            <Text style={styles.dynamicFieldLabel}>
+                              {field.label}
+                              {field.required ? ' *' : ''}
+                            </Text>
+                            {field.isRemovable ? (
+                              <TouchableOpacity
+                                onPress={() => {
+                                  setEditFormValues((prev) => {
+                                    const copy = { ...prev };
+                                    delete copy[field.key];
+                                    return copy;
+                                  });
+                                }}
+                              >
+                                <Text style={styles.removeFieldText}>✕ Remove</Text>
+                              </TouchableOpacity>
+                            ) : null}
+                          </View>
+                          <Input
+                            value={field.value}
+                            onChangeText={(text) => {
+                              setEditFormValues((prev) => ({
+                                ...prev,
+                                [field.key]: text,
+                              }));
+                            }}
+                            placeholder={field.placeholder || `Enter ${field.label.toLowerCase()}`}
+                            multiline={field.multiline}
+                          />
+                        </View>
                       ))}
-                    </ScrollView>
 
-                    <Input
-                      label="Document Number"
-                      value={editNumber}
-                      onChangeText={setEditNumber}
-                      placeholder="e.g. XXXX-XXXX-1234"
-                    />
+                      {getRenderedFields(selectedDoc, editFormValues).length === 0 ? (
+                        <Text style={{ fontSize: 13, color: theme.colors.textMuted, marginVertical: 8 }}>
+                          No specific fields were saved for this document. You can add details below.
+                        </Text>
+                      ) : null}
 
-                    <Input
-                      label="Issue Date (Optional)"
-                      value={editIssueDate}
-                      onChangeText={setEditIssueDate}
-                      placeholder="YYYY-MM-DD"
-                    />
-
-                    <Input
-                      label="Expiry Date (Optional)"
-                      value={editExpiryDate}
-                      onChangeText={setEditExpiryDate}
-                      placeholder="YYYY-MM-DD"
-                    />
+                      {/* Add Custom Field Inline Card */}
+                      {isAddingField ? (
+                        <View style={styles.addFieldBox}>
+                          <Text style={styles.addFieldBoxTitle}>Add Custom Field</Text>
+                          <Input
+                            label="Field Name"
+                            value={newFieldKey}
+                            onChangeText={setNewFieldKey}
+                            placeholder="e.g. RAM, Storage, Model"
+                          />
+                          <Input
+                            label="Field Value"
+                            value={newFieldValue}
+                            onChangeText={setNewFieldValue}
+                            placeholder="e.g. 16 GB, 512 GB SSD"
+                          />
+                          <View style={styles.addFieldButtonRow}>
+                            <TouchableOpacity
+                              style={[styles.addFieldMiniBtn, styles.addFieldMiniBtnCancel]}
+                              onPress={() => {
+                                setIsAddingField(false);
+                                setNewFieldKey('');
+                                setNewFieldValue('');
+                              }}
+                            >
+                              <Text style={styles.addFieldMiniBtnCancelText}>Cancel</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={[styles.addFieldMiniBtn, styles.addFieldMiniBtnAdd]}
+                              onPress={() => {
+                                const k = newFieldKey.trim();
+                                const v = newFieldValue.trim();
+                                if (!k) {
+                                  Alert.alert('Validation Error', 'Field name is required.');
+                                  return;
+                                }
+                                setEditFormValues((prev) => ({
+                                  ...prev,
+                                  [k]: v,
+                                }));
+                                setNewFieldKey('');
+                                setNewFieldValue('');
+                                setIsAddingField(false);
+                              }}
+                            >
+                              <Text style={styles.addFieldMiniBtnAddText}>+ Add</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      ) : (
+                        <TouchableOpacity
+                          style={styles.addCustomFieldBtn}
+                          onPress={() => setIsAddingField(true)}
+                        >
+                          <Text style={styles.addCustomFieldBtnText}>+ Add Custom Field</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
 
                     <View style={styles.modalActions}>
                       <Button
@@ -797,7 +1225,7 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
                       />
                       <Button
                         title="Cancel"
-                        onPress={() => setIsEditMode(false)}
+                        onPress={handleCancelEdit}
                         variant="outlined"
                         style={{ flex: 1, marginLeft: 8 }}
                       />
@@ -1094,5 +1522,92 @@ const styles = StyleSheet.create({
   fullScreenImage: {
     width: width,
     height: '80%',
+  },
+  dynamicFieldRow: {
+    marginBottom: theme.spacing.sm,
+    backgroundColor: theme.colors.surface,
+    padding: theme.spacing.sm,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  dynamicFieldHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  dynamicFieldLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.colors.textPrimary,
+    textTransform: 'capitalize',
+  },
+  removeFieldText: {
+    fontSize: 12,
+    color: theme.colors.error,
+    fontWeight: '600',
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+  },
+  addFieldBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: theme.radius.sm,
+    padding: theme.spacing.sm,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.sm,
+  },
+  addFieldBoxTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: theme.colors.textPrimary,
+    marginBottom: theme.spacing.xs,
+  },
+  addFieldButtonRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: theme.spacing.xs,
+    gap: 8,
+  },
+  addFieldMiniBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    borderRadius: theme.radius.sm,
+    alignItems: 'center',
+  },
+  addFieldMiniBtnCancel: {
+    backgroundColor: '#E2E8F0',
+  },
+  addFieldMiniBtnCancelText: {
+    color: theme.colors.textSecondary,
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  addFieldMiniBtnAdd: {
+    backgroundColor: theme.colors.primary,
+  },
+  addFieldMiniBtnAddText: {
+    color: '#FFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  addCustomFieldBtn: {
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: theme.colors.primary,
+    borderRadius: theme.radius.sm,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.sm,
+    backgroundColor: '#F0F9FF',
+  },
+  addCustomFieldBtnText: {
+    color: theme.colors.primary,
+    fontWeight: '700',
+    fontSize: 13,
   },
 });

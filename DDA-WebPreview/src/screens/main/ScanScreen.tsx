@@ -79,6 +79,9 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
 
   // Save state
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isAddingField, setIsAddingField] = useState<boolean>(false);
+  const [newFieldKey, setNewFieldKey] = useState<string>('');
+  const [newFieldValue, setNewFieldValue] = useState<string>('');
 
   // Template key resolution
   const effectiveTemplateKey = detectedDocumentType || categoryToTemplateKey(selectedType) || '';
@@ -96,6 +99,9 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     setValidationIssues([]);
     setOcrConfidence(null);
     setOcrFailed(false);
+    setIsAddingField(false);
+    setNewFieldKey('');
+    setNewFieldValue('');
   };
 
   // Process & apply OCR extraction results
@@ -108,6 +114,7 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     validationIssues?: string[];
     missingRequiredFields?: string[];
   }) => {
+    console.log(`[OCR_TRACE] STEP 9 final fields sent to UI: count=${Object.keys(result.fields || {}).length}, fields=${JSON.stringify(result.fields || {})}`);
     const detected = result.documentType;
     setDetectedDocumentType(detected);
 
@@ -169,6 +176,9 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     setOcrFailed(false);
     setDynamicFields({});
     setDetectedDocumentType('');
+    setIsAddingField(false);
+    setNewFieldKey('');
+    setNewFieldValue('');
     setShowCropScreen(true);
   };
 
@@ -526,16 +536,26 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
           {currentTemplate ? (
             <>
               {currentTemplate.fields.map(field => {
-                const valInfo = validatedFields[field.key];
+                const valInfo = validatedFields[field.key] || validatedFields[Object.keys(validatedFields).find(k => k.toLowerCase() === field.key.toLowerCase()) || ''];
+                const fieldValue = dynamicFields[field.key] ?? dynamicFields[Object.keys(dynamicFields).find(k => k.toLowerCase() === field.key.toLowerCase()) || ''] ?? '';
 
                 return (
                   <View key={field.key} style={styles.fieldWrapper}>
                     <Input
                       label={field.label + (field.required ? ' *' : '')}
-                      value={dynamicFields[field.key] || ''}
+                      value={fieldValue}
                       onChangeText={text => {
-                        setDynamicFields(prev => ({ ...prev, [field.key]: text }));
-                        if (validatedFields[field.key]?.needsReview) {
+                        setDynamicFields(prev => {
+                          const updated = { ...prev };
+                          for (const k of Object.keys(updated)) {
+                            if (k.toLowerCase() === field.key.toLowerCase() && k !== field.key) {
+                              delete updated[k];
+                            }
+                          }
+                          updated[field.key] = text;
+                          return updated;
+                        });
+                        if (valInfo?.needsReview) {
                           setValidatedFields(prev => ({
                             ...prev,
                             [field.key]: {
@@ -553,6 +573,55 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
                   </View>
                 );
               })}
+
+              {/* Additional AI extracted fields not in template */}
+              {(() => {
+                const extraFields = Object.entries(dynamicFields).filter(([k]) => {
+                  return !currentTemplate.fields.some(f => f.key.toLowerCase() === k.toLowerCase());
+                });
+                if (extraFields.length === 0) return null;
+
+                return (
+                  <View style={styles.extraFieldsSection}>
+                    <Text style={styles.extraFieldsHeader}>Additional Extracted Details</Text>
+                    {extraFields.map(([key, value]) => {
+                      const valInfo = validatedFields[key];
+                      const formattedLabel = key
+                        .replace(/([A-Z])/g, ' $1')
+                        .replace(/_/g, ' ')
+                        .replace(/^\w/, c => c.toUpperCase())
+                        .trim();
+
+                      return (
+                        <View key={key} style={styles.fieldWrapper}>
+                          <View style={styles.fieldHeaderRow}>
+                            <Text style={styles.fieldHeaderLabel}>{formattedLabel}</Text>
+                            <TouchableOpacity
+                              onPress={() => {
+                                setDynamicFields(prev => {
+                                  const copy = { ...prev };
+                                  delete copy[key];
+                                  return copy;
+                                });
+                              }}
+                            >
+                              <Text style={styles.removeFieldText}>✕ Remove</Text>
+                            </TouchableOpacity>
+                          </View>
+                          <Input
+                            value={value || ''}
+                            onChangeText={text => {
+                              setDynamicFields(prev => ({ ...prev, [key]: text }));
+                            }}
+                            placeholder={`Enter ${formattedLabel.toLowerCase()}`}
+                            error={valInfo?.needsReview && valInfo.issue ? valInfo.issue : undefined}
+                          />
+                        </View>
+                      );
+                    })}
+                  </View>
+                );
+              })()}
             </>
           ) : (
             Object.entries(dynamicFields).length > 0 ? (
@@ -567,8 +636,21 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
 
                   return (
                     <View key={key} style={styles.fieldWrapper}>
+                      <View style={styles.fieldHeaderRow}>
+                        <Text style={styles.fieldHeaderLabel}>{formattedLabel}</Text>
+                        <TouchableOpacity
+                          onPress={() => {
+                            setDynamicFields(prev => {
+                              const copy = { ...prev };
+                              delete copy[key];
+                              return copy;
+                            });
+                          }}
+                        >
+                          <Text style={styles.removeFieldText}>✕ Remove</Text>
+                        </TouchableOpacity>
+                      </View>
                       <Input
-                        label={formattedLabel}
                         value={value || ''}
                         onChangeText={text => {
                           setDynamicFields(prev => ({ ...prev, [key]: text }));
@@ -599,6 +681,63 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
               </View>
             )
           )}
+
+          {/* Add Custom Field Section */}
+          <View style={styles.addFieldContainer}>
+            {isAddingField ? (
+              <View style={styles.addFieldForm}>
+                <Input
+                  label="Field Name"
+                  value={newFieldKey}
+                  onChangeText={setNewFieldKey}
+                  placeholder="e.g. Serial Number, Color, Tax ID"
+                />
+                <Input
+                  label="Field Value"
+                  value={newFieldValue}
+                  onChangeText={setNewFieldValue}
+                  placeholder="e.g. 12345, Blue, 18%"
+                />
+                <View style={styles.addFieldActions}>
+                  <TouchableOpacity
+                    style={[styles.addFieldBtn, styles.addFieldBtnCancel]}
+                    onPress={() => {
+                      setIsAddingField(false);
+                      setNewFieldKey('');
+                      setNewFieldValue('');
+                    }}
+                  >
+                    <Text style={styles.addFieldBtnCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.addFieldBtn, styles.addFieldBtnSave]}
+                    onPress={() => {
+                      if (newFieldKey.trim()) {
+                        setDynamicFields(prev => ({
+                          ...prev,
+                          [newFieldKey.trim()]: newFieldValue.trim(),
+                        }));
+                        setIsAddingField(false);
+                        setNewFieldKey('');
+                        setNewFieldValue('');
+                      } else {
+                        Alert.alert('Field Name Required', 'Please enter a name for the custom field.');
+                      }
+                    }}
+                  >
+                    <Text style={styles.addFieldBtnSaveText}>Add Field</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.addFieldTriggerBtn}
+                onPress={() => setIsAddingField(true)}
+              >
+                <Text style={styles.addFieldTriggerText}>➕ Add Custom Field</Text>
+              </TouchableOpacity>
+            )}
+          </View>
 
           <Button
             title="💾 Save Document to Vault"
@@ -911,5 +1050,88 @@ const styles = StyleSheet.create({
     color: '#64748B',
     fontSize: 13,
     textAlign: 'center',
+  },
+  extraFieldsSection: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  extraFieldsHeader: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  fieldHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  fieldHeaderLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  removeFieldText: {
+    fontSize: 11,
+    color: '#EF4444',
+    fontWeight: '600',
+  },
+  addFieldContainer: {
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  addFieldTriggerBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#3B82F6',
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+  },
+  addFieldTriggerText: {
+    color: '#2563EB',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  addFieldForm: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    padding: 12,
+  },
+  addFieldActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 8,
+  },
+  addFieldBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  addFieldBtnCancel: {
+    backgroundColor: '#E2E8F0',
+  },
+  addFieldBtnCancelText: {
+    color: '#475569',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  addFieldBtnSave: {
+    backgroundColor: '#2563EB',
+  },
+  addFieldBtnSaveText: {
+    color: '#FFF',
+    fontWeight: '700',
+    fontSize: 12,
   },
 });

@@ -5,8 +5,6 @@ import {
   browserLocalPersistence,
   inMemoryPersistence,
 } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
-import { getStorage } from "firebase/storage";
 import { Platform } from "react-native";
 
 const firebaseConfig = {
@@ -31,7 +29,5 @@ const getAuthInstance = () => {
 };
 
 export const auth = getAuthInstance();
-export const firestore = getFirestore(app);
-export const storage = getStorage(app);
 
 export default app;

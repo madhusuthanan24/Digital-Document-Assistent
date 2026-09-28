@@ -1,14 +1,30 @@
 /**
- * documentService.ts — PostgreSQL Database Service
+ * documentService.ts — PostgreSQL Database Service (DDA-WebPreview)
  *
  * Communicates with Node.js Express + Prisma + PostgreSQL backend (DDA-Backend)
  * to store and retrieve document metadata & cropped image attachments.
+ * Completely eliminates obsolete Firebase Firestore and Storage dependencies.
  */
 
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { DocumentMetadata, ExpiryReminder } from '../../types/document';
 
-const API_BASE_URL = Platform.OS === 'android' ? 'http://10.0.2.2:5000' : 'http://localhost:5000';
+const getBackendBaseUrl = (): string => {
+  if (Platform.OS === 'web') {
+    return 'http://localhost:5000';
+  }
+  const hostUri = Constants.expoConfig?.hostUri || (Constants as any).manifest?.debuggerHost;
+  if (hostUri) {
+    const hostIp = hostUri.split(':')[0];
+    if (hostIp && hostIp !== 'localhost' && hostIp !== '127.0.0.1') {
+      return `http://${hostIp}:5000`;
+    }
+  }
+  return Platform.OS === 'android' ? 'http://10.1.1.88:5000' : 'http://localhost:5000';
+};
+
+const API_BASE_URL = getBackendBaseUrl();
 
 class DocumentService {
   /**
@@ -31,6 +47,53 @@ class DocumentService {
     }
     return '';
   }
+
+  /**
+   * Add Document to PostgreSQL database via DDA-Backend REST API.
+   * Uploads the cropped image file along with document metadata.
+   */
+  /**
+   * Helper to execute multipart/form-data upload using XMLHttpRequest.
+   * This natively supports React Native's { uri, name, type } file parts via RCTNetworking
+   * without triggering expo/fetch's "Unsupported FormDataPart implementation" error.
+   */
+  private executeMultipartUpload(
+    url: string,
+    formData: FormData,
+    userId: string
+  ): Promise<{ ok: boolean; status: number; data: any }> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.setRequestHeader('x-user-id', userId);
+      xhr.timeout = 60000;
+
+      xhr.onload = () => {
+        let resData: any = null;
+        try {
+          resData = JSON.parse(xhr.responseText);
+        } catch {
+          resData = { success: xhr.status >= 200 && xhr.status < 300, message: xhr.responseText };
+        }
+        resolve({
+          ok: xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          data: resData,
+        });
+      };
+
+      xhr.onerror = () => {
+        reject(new Error(`Network request failed (status: ${xhr.status || 'unknown'})`));
+      };
+
+      xhr.ontimeout = () => {
+        reject(new Error('Document upload request timed out after 60 seconds'));
+      };
+
+      xhr.send(formData);
+    });
+  }
+
   /**
    * Add Document to PostgreSQL database via DDA-Backend REST API.
    * Uploads the cropped image file along with document metadata.
@@ -39,9 +102,9 @@ class DocumentService {
     userId: string,
     docData: Omit<DocumentMetadata, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
   ): Promise<string> {
-    console.log(`[Document] Saving document: type="${docData.documentType}", name="${docData.documentName}"`);
+    console.log(`[POSTGRES_DOC] Saving document: type="${docData.documentType}", name="${docData.documentName}" for user: ${userId}`);
 
-    const fileUri = docData.localFileUri;
+    const fileUri = docData.croppedImagePath || docData.localFileUri || docData.imagePath;
     const formData = new FormData();
 
     formData.append('userId', userId);
@@ -59,38 +122,51 @@ class DocumentService {
     if (docData.fields) formData.append('fields', JSON.stringify(docData.fields));
 
     if (fileUri) {
-      console.log(`[Document] Image path: ${fileUri}`);
       const filename = docData.fileName || fileUri.split('/').pop() || `cropped_${Date.now()}.jpg`;
       const mime = docData.mimeType || 'image/jpeg';
-      formData.append('file', {
-        uri: fileUri,
-        name: filename,
-        type: mime,
-      } as any);
-    }
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/documents`, {
-        method: 'POST',
-        headers: {
-          'x-user-id': userId,
-        },
-        body: formData,
-      });
+      console.log(`[POSTGRES_DOC_DIAG] upload URI: ${fileUri}`);
+      console.log(`[POSTGRES_DOC_DIAG] upload MIME: ${mime}`);
+      console.log(`[POSTGRES_DOC_DIAG] upload filename: ${filename}`);
+      console.log(`[POSTGRES_DOC_DIAG] FormData field: file`);
 
-      const resData = await response.json();
-      if (response.ok && resData.success) {
-        const createdDoc = resData.data;
-        console.log(`[Document] PostgreSQL document created: id=${createdDoc.id}`);
-        return createdDoc.id;
+      if (Platform.OS === 'web' && typeof fetch === 'function') {
+        console.log(`[POSTGRES_DOC_DIAG] FormData value type: Blob (Web)`);
+        try {
+          const resp = await fetch(fileUri);
+          const blob = await resp.blob();
+          formData.append('file', blob, filename);
+        } catch {
+          formData.append('file', {
+            uri: fileUri,
+            name: filename,
+            type: mime,
+          } as any);
+        }
       } else {
-        console.warn(`[Document] PostgreSQL API error: ${resData.message}`);
+        console.log(`[POSTGRES_DOC_DIAG] FormData value type: React Native File Object ({ uri, name, type })`);
+        formData.append('file', {
+          uri: fileUri,
+          name: filename,
+          type: mime,
+        } as any);
       }
-    } catch (apiErr: any) {
-      console.warn(`[Document] PostgreSQL API request fallback: ${apiErr?.message}`);
     }
 
-    return `doc_${Date.now()}`;
+    const uploadUrl = `${API_BASE_URL}/api/documents`;
+    console.log(`[POSTGRES_DOC] Submitting multipart upload to: ${uploadUrl}`);
+
+    const res = await this.executeMultipartUpload(uploadUrl, formData, userId);
+
+    if (res.ok && res.data?.success) {
+      const createdDoc = res.data.data;
+      console.log(`[POSTGRES_DOC] PostgreSQL document created: id=${createdDoc.id}`);
+      return createdDoc.id;
+    } else {
+      const errMsg = res.data?.message || `Upload failed with HTTP status ${res.status}`;
+      console.error(`[POSTGRES_DOC] PostgreSQL upload failed: ${errMsg}`);
+      throw new Error(`Failed to save document to PostgreSQL database: ${errMsg}`);
+    }
   }
 
   /**
@@ -98,6 +174,7 @@ class DocumentService {
    */
   public async getDocuments(userId: string): Promise<DocumentMetadata[]> {
     if (!userId) return [];
+    console.log(`[POSTGRES_DOC] Fetching documents for user: ${userId}`);
     try {
       const response = await fetch(`${API_BASE_URL}/api/documents`, {
         method: 'GET',
@@ -113,6 +190,13 @@ class DocumentService {
             parsedFields = doc.fields;
           }
 
+          const rawPath = doc.croppedImagePath || doc.imagePath || '';
+          const fullImageUrl = rawPath
+            ? (rawPath.startsWith('http://') || rawPath.startsWith('https://') || rawPath.startsWith('file://') || rawPath.startsWith('content://')
+                ? rawPath
+                : `${API_BASE_URL}${rawPath.startsWith('/') ? '' : '/'}${rawPath}`)
+            : '';
+
           return {
             id: doc.id,
             userId: doc.userId,
@@ -127,17 +211,18 @@ class DocumentService {
             issueDate: doc.issueDate || '',
             expiryDate: doc.expiryDate || '',
             fields: parsedFields,
-            imagePath: doc.imagePath || '',
-            croppedImagePath: doc.croppedImagePath || doc.imagePath || '',
+            imagePath: fullImageUrl || doc.imagePath || '',
+            croppedImagePath: fullImageUrl || doc.croppedImagePath || '',
             originalImagePath: doc.originalImagePath || '',
-            localFileUri: (doc.croppedImagePath || doc.imagePath) ? `${API_BASE_URL}${doc.croppedImagePath || doc.imagePath}` : '',
+            localFileUri: fullImageUrl,
             mimeType: doc.mimeType || 'image/jpeg',
             createdAt: doc.createdAt,
+            updatedAt: doc.updatedAt || doc.createdAt,
           };
         });
       }
     } catch (err: any) {
-      console.warn(`[Document] Fetch documents fallback: ${err?.message}`);
+      console.warn(`[POSTGRES_DOC] Fetch documents fallback: ${err?.message}`);
     }
     return [];
   }
@@ -165,6 +250,13 @@ class DocumentService {
           parsedFields = doc.fields;
         }
 
+        const rawPath = doc.croppedImagePath || doc.imagePath || '';
+        const fullImageUrl = rawPath
+          ? (rawPath.startsWith('http://') || rawPath.startsWith('https://') || rawPath.startsWith('file://') || rawPath.startsWith('content://')
+              ? rawPath
+              : `${API_BASE_URL}${rawPath.startsWith('/') ? '' : '/'}${rawPath}`)
+          : '';
+
         return {
           id: doc.id,
           userId: doc.userId,
@@ -179,14 +271,17 @@ class DocumentService {
           issueDate: doc.issueDate || '',
           expiryDate: doc.expiryDate || '',
           fields: parsedFields,
-          imagePath: doc.imagePath || '',
-          localFileUri: doc.imagePath ? `${API_BASE_URL}${doc.imagePath}` : '',
+          imagePath: fullImageUrl || doc.imagePath || '',
+          croppedImagePath: fullImageUrl || doc.croppedImagePath || '',
+          originalImagePath: doc.originalImagePath || '',
+          localFileUri: fullImageUrl,
           mimeType: doc.mimeType || 'image/jpeg',
           createdAt: doc.createdAt,
+          updatedAt: doc.updatedAt || doc.createdAt,
         };
       }
     } catch (err: any) {
-      console.warn(`[Document] Get document by ID fallback: ${err?.message}`);
+      console.warn(`[POSTGRES_DOC] Get document by ID fallback: ${err?.message}`);
     }
     return null;
   }
@@ -197,7 +292,7 @@ class DocumentService {
     docData: Partial<Omit<DocumentMetadata, 'id' | 'userId' | 'createdAt'>>
   ): Promise<void> {
     try {
-      await fetch(`${API_BASE_URL}/api/documents/${documentId}`, {
+      const response = await fetch(`${API_BASE_URL}/api/documents/${documentId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -205,8 +300,20 @@ class DocumentService {
         },
         body: JSON.stringify(docData),
       });
+      console.log(`[DOCUMENT_EDIT] Update API response: ${response.status}`);
+      let resData: any = null;
+      try {
+        resData = await response.json();
+      } catch {
+        resData = {};
+      }
+      if (!response.ok || (resData && resData.success === false)) {
+        throw new Error(resData?.message || `Failed to update document (status: ${response.status})`);
+      }
+      console.log(`[DOCUMENT_EDIT] Updated successfully: ${documentId}`);
     } catch (err: any) {
-      console.warn(`[Document] Update document fallback: ${err?.message}`);
+      console.warn(`[POSTGRES_DOC] Update document error: ${err?.message}`);
+      throw err;
     }
   }
 
@@ -220,7 +327,7 @@ class DocumentService {
         headers: { 'x-user-id': userId },
       });
     } catch (err: any) {
-      console.warn(`[Document] Delete document fallback: ${err?.message}`);
+      console.warn(`[POSTGRES_DOC] Delete document fallback: ${err?.message}`);
     }
   }
 
@@ -235,7 +342,7 @@ class DocumentService {
         return resData.data;
       }
     } catch (err: any) {
-      console.warn(`[Document] Get reminders fallback: ${err?.message}`);
+      console.warn(`[POSTGRES_DOC] Get reminders fallback: ${err?.message}`);
     }
 
     const docs = await this.getDocuments(userId);

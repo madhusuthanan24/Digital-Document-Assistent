@@ -117,12 +117,12 @@ export const ProfileScreen: React.FC<any> = ({ navigation }) => {
 
         <View style={styles.settingRow}>
           <Text style={styles.settingLabel}>User Profile Store</Text>
-          <Text style={styles.settingValue}>Cloud Firestore (users/{'{uid}'})</Text>
+          <Text style={styles.settingValue}>PostgreSQL / Firebase Auth</Text>
         </View>
 
         <View style={styles.settingRow}>
-          <Text style={styles.settingLabel}>File Storage</Text>
-          <Text style={styles.settingValue}>Firebase Storage (Phase 3)</Text>
+          <Text style={styles.settingLabel}>Document Vault</Text>
+          <Text style={styles.settingValue}>PostgreSQL + Prisma</Text>
         </View>
 
         <View style={[styles.settingRow, styles.lastRow]}>
@@ -131,11 +131,11 @@ export const ProfileScreen: React.FC<any> = ({ navigation }) => {
         </View>
       </View>
 
-      {/* Firebase Status */}
+      {/* Backend & Auth Status */}
       <View style={[styles.card, styles.statusCard]}>
         <View style={styles.statusRow}>
           <Text style={styles.statusDot}>🟢</Text>
-          <Text style={styles.statusLabel}>Firebase SDK Initialized</Text>
+          <Text style={styles.statusLabel}>Firebase Auth Initialized</Text>
         </View>
         <View style={styles.statusRow}>
           <Text style={styles.statusDot}>🟢</Text>
@@ -143,7 +143,7 @@ export const ProfileScreen: React.FC<any> = ({ navigation }) => {
         </View>
         <View style={styles.statusRow}>
           <Text style={styles.statusDot}>🟢</Text>
-          <Text style={styles.statusLabel}>Firestore Connected</Text>
+          <Text style={styles.statusLabel}>PostgreSQL Database Connected</Text>
         </View>
       </View>
 

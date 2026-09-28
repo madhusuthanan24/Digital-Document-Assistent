@@ -32,7 +32,7 @@ declare const atob: any;
 declare const Buffer: any;
 
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -195,18 +195,7 @@ export function parseExifOrientation(bytes: Uint8Array): OrientationInfo {
 async function detectImageOrientation(uri: string): Promise<OrientationInfo> {
   try {
     let base64Chunk = '';
-    try {
-      const LegacyFS = require('expo-file-system/legacy');
-      if (LegacyFS?.readAsStringAsync) {
-        base64Chunk = await LegacyFS.readAsStringAsync(uri, {
-          encoding: LegacyFS.EncodingType?.Base64 || 'base64',
-          length: 65536,
-          position: 0,
-        });
-      }
-    } catch { /* fallback to standard FileSystem */ }
-
-    if (!base64Chunk && FileSystem?.readAsStringAsync) {
+    if (FileSystem?.readAsStringAsync) {
       base64Chunk = await FileSystem.readAsStringAsync(uri, {
         encoding: (FileSystem as any).EncodingType?.Base64 || 'base64',
         length: 65536,

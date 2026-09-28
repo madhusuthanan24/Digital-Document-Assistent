@@ -7,12 +7,7 @@ import {
   updateProfile,
   User,
 } from 'firebase/auth';
-import {
-  doc,
-  setDoc,
-  serverTimestamp,
-} from 'firebase/firestore';
-import { auth, firestore } from '../../config/firebase';
+import { auth } from '../../config/firebase';
 import { UserProfile } from '../../types/auth';
 
 // ---------------------------------------------------------------------------
@@ -122,14 +117,6 @@ class AuthService {
 
       // 2. Set display name on the Auth profile
       await updateProfile(user, { displayName: fullName.trim() });
-
-      // 3. Write user document to Firestore — passwords are NEVER stored
-      await setDoc(doc(firestore, 'users', user.uid), {
-        uid: user.uid,
-        fullName: fullName.trim(),
-        email: email.trim().toLowerCase(),
-        createdAt: serverTimestamp(),
-      });
 
       return {
         uid: user.uid,

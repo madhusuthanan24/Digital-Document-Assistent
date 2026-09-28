@@ -6,23 +6,37 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  Platform,
   Alert,
   Modal,
   Image,
-  ActivityIndicator,
-  Linking,
+  Dimensions,
+  Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
+import { readAsStringAsync, writeAsStringAsync, EncodingType, cacheDirectory, documentDirectory, downloadAsync, StorageAccessFramework, copyAsync, getInfoAsync } from 'expo-file-system/legacy';
 import { theme } from '../../constants/theme';
 import { documentService } from '../../services/document/documentService';
 import { DocumentCategory, DocumentMetadata } from '../../types/document';
+import { DOCUMENT_TEMPLATES, categoryToTemplateKey } from '../../templates/documentTemplates';
 import { LoadingIndicator } from '../../components/common/LoadingIndicator';
 import { EmptyState } from '../../components/common/EmptyState';
 import { Button } from '../../components/common/Button';
 import { Input } from '../../components/common/Input';
 import { useAuth } from '../../context/AuthContext';
-import { pdfService } from '../../services/pdf/pdfService';
+
+const { width } = Dimensions.get('window');
+
+interface EditableFieldItem {
+  key: string;
+  label: string;
+  value: string;
+  placeholder?: string;
+  required?: boolean;
+  isRemovable?: boolean;
+  multiline?: boolean;
+}
 
 export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
   const { user } = useAuth();
@@ -36,24 +50,21 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
   const [selectedDoc, setSelectedDoc] = useState<DocumentMetadata | null>(null);
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [editName, setEditName] = useState<string>('');
-  const [editType, setEditType] = useState<DocumentCategory>('Other');
-  const [editNumber, setEditNumber] = useState<string>('');
-  const [editIssueDate, setEditIssueDate] = useState<string>('');
-  const [editExpiryDate, setEditExpiryDate] = useState<string>('');
+  const [editFormValues, setEditFormValues] = useState<Record<string, string>>({});
+  const [isAddingField, setIsAddingField] = useState<boolean>(false);
+  const [newFieldKey, setNewFieldKey] = useState<string>('');
+  const [newFieldValue, setNewFieldValue] = useState<string>('');
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
 
-  // PDF Action States
-  const [isViewingPdf, setIsViewingPdf] = useState<boolean>(false);
-  const [isDownloadingPdf, setIsDownloadingPdf] = useState<boolean>(false);
-  const [isSharingPdf, setIsSharingPdf] = useState<boolean>(false);
-
-  // Image load error tracking
-  const [imageErrorMap, setImageErrorMap] = useState<Record<string, boolean>>({});
+  // Large Image Preview State
+  const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
 
   const categories = [
     { label: 'All', value: 'ALL' },
     { label: 'Aadhaar', value: 'Aadhaar' },
     { label: 'PAN', value: 'PAN' },
+    { label: 'Voter ID', value: 'VoterID' },
     { label: 'Passport', value: 'Passport' },
     { label: 'Licence', value: 'DrivingLicence' },
     { label: 'Vehicle RC', value: 'VehicleRC' },
@@ -67,7 +78,6 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      console.log('[Vault] Loading document list');
       const data = await documentService.getDocuments(user.uid);
       setDocuments(data);
     } catch (err: any) {
@@ -83,68 +93,245 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     }, [fetchDocs])
   );
 
+  const resolveTemplateKey = (category: string, docName?: string): string | undefined => {
+    const normalizedCategory = category === 'VoterID' ? 'Voter ID' : category;
+    const mapped = categoryToTemplateKey(normalizedCategory);
+    if (mapped && DOCUMENT_TEMPLATES[mapped]) return mapped;
+    if (DOCUMENT_TEMPLATES[category]) return category;
+    if (docName && DOCUMENT_TEMPLATES[docName]) return docName;
+    return undefined;
+  };
+
+  const buildInitialFormValues = (doc: DocumentMetadata): Record<string, string> => {
+    const values: Record<string, string> = {};
+
+    // 1. Populate all saved dynamic fields from doc.fields
+    if (doc.fields && typeof doc.fields === 'object') {
+      for (const [k, v] of Object.entries(doc.fields)) {
+        if (v !== undefined && v !== null && String(v).trim()) {
+          values[k] = String(v).trim();
+        }
+      }
+    }
+
+    const templateKey = resolveTemplateKey(doc.documentType, doc.documentName);
+    const template = templateKey ? DOCUMENT_TEMPLATES[templateKey] : undefined;
+
+    if (template) {
+      // 2. Pre-populate template fields from matching doc attributes if not in fields
+      for (const f of template.fields) {
+        const existingKey = Object.keys(values).find(k => k.toLowerCase() === f.key.toLowerCase());
+        if (!existingKey || !values[existingKey]) {
+          let valFromRoot = '';
+          const lk = f.key.toLowerCase();
+          if (
+            lk.includes('number') ||
+            lk.includes('epic') ||
+            lk.includes('licence') ||
+            lk.includes('policy') ||
+            lk.includes('registration') ||
+            lk.includes('roll') ||
+            lk.includes('account')
+          ) {
+            valFromRoot = doc.documentNumber || '';
+          } else if (
+            lk === 'name' ||
+            lk.includes('holder') ||
+            lk.includes('owner') ||
+            lk.includes('student') ||
+            lk.includes('patient')
+          ) {
+            valFromRoot = doc.name || '';
+          } else if (
+            lk.includes('father') ||
+            lk.includes('husband') ||
+            lk.includes('guardian') ||
+            lk.includes('relative')
+          ) {
+            valFromRoot = doc.fatherName || '';
+          } else if (lk === 'gender' || lk === 'sex') {
+            valFromRoot = doc.gender || '';
+          } else if (lk.includes('birth') || lk === 'dob') {
+            valFromRoot = doc.dateOfBirth || '';
+          } else if (lk === 'address') {
+            valFromRoot = doc.address || '';
+          } else if (lk === 'issuedate') {
+            valFromRoot = doc.issueDate || '';
+          } else if (lk === 'expirydate') {
+            valFromRoot = doc.expiryDate || '';
+          }
+          if (valFromRoot) {
+            values[f.key] = valFromRoot;
+          }
+        }
+      }
+    } else {
+      // 3. For "Other" / Custom documents: ONLY add root properties if they contain non-empty saved data
+      if (doc.documentNumber && doc.documentNumber.trim() && !values['documentNumber']) {
+        values['documentNumber'] = doc.documentNumber.trim();
+      }
+      if (doc.name && doc.name.trim() && !values['name']) {
+        values['name'] = doc.name.trim();
+      }
+      if (doc.fatherName && doc.fatherName.trim() && !values['fatherName']) {
+        values['fatherName'] = doc.fatherName.trim();
+      }
+      if (doc.gender && doc.gender.trim() && !values['gender']) {
+        values['gender'] = doc.gender.trim();
+      }
+      if (doc.dateOfBirth && doc.dateOfBirth.trim() && !values['dateOfBirth']) {
+        values['dateOfBirth'] = doc.dateOfBirth.trim();
+      }
+      if (doc.address && doc.address.trim() && !values['address']) {
+        values['address'] = doc.address.trim();
+      }
+      if (doc.issueDate && doc.issueDate.trim() && !values['issueDate']) {
+        values['issueDate'] = doc.issueDate.trim();
+      }
+      if (doc.expiryDate && doc.expiryDate.trim() && !values['expiryDate']) {
+        values['expiryDate'] = doc.expiryDate.trim();
+      }
+    }
+
+    return values;
+  };
+
+  const getRenderedFields = (doc: DocumentMetadata, formValues: Record<string, string>): EditableFieldItem[] => {
+    const templateKey = resolveTemplateKey(doc.documentType, doc.documentName);
+    const template = templateKey ? DOCUMENT_TEMPLATES[templateKey] : undefined;
+
+    const fields: EditableFieldItem[] = [];
+    const usedKeys = new Set<string>();
+
+    if (template) {
+      // 1. Template fields in defined order
+      for (const tf of template.fields) {
+        usedKeys.add(tf.key.toLowerCase());
+        const matchingKey = Object.keys(formValues).find(k => k.toLowerCase() === tf.key.toLowerCase()) || tf.key;
+        const val = formValues[matchingKey] ?? '';
+
+        fields.push({
+          key: matchingKey,
+          label: tf.label,
+          value: val,
+          placeholder: `Enter ${tf.label.toLowerCase()}`,
+          required: tf.required,
+          isRemovable: false,
+          multiline: tf.key.toLowerCase().includes('address'),
+        });
+      }
+
+      // 2. Extra saved dynamic fields outside template
+      for (const [k, v] of Object.entries(formValues)) {
+        if (!usedKeys.has(k.toLowerCase())) {
+          usedKeys.add(k.toLowerCase());
+          const formattedLabel = k
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/_/g, ' ')
+            .replace(/^\w/, c => c.toUpperCase())
+            .trim();
+
+          fields.push({
+            key: k,
+            label: formattedLabel,
+            value: v || '',
+            placeholder: `Enter ${formattedLabel.toLowerCase()}`,
+            isRemovable: true,
+            multiline: k.toLowerCase().includes('address') || k.toLowerCase().includes('spec') || k.toLowerCase().includes('feature'),
+          });
+        }
+      }
+    } else {
+      // Custom / "Other" document: ONLY fields that actually exist in doc.fields or non-empty root properties
+      const keysOrder: string[] = [];
+
+      // Preserve doc.fields order first
+      if (doc.fields) {
+        for (const k of Object.keys(doc.fields)) {
+          if (!keysOrder.includes(k)) keysOrder.push(k);
+        }
+      }
+
+      // Include root props if they exist in formValues
+      const rootKeys = ['documentNumber', 'name', 'fatherName', 'gender', 'dateOfBirth', 'address', 'issueDate', 'expiryDate'];
+      for (const rk of rootKeys) {
+        if (formValues[rk] && !keysOrder.includes(rk)) {
+          keysOrder.push(rk);
+        }
+      }
+
+      // Include any other keys in formValues (e.g. newly added custom fields)
+      for (const k of Object.keys(formValues)) {
+        if (!keysOrder.includes(k)) {
+          keysOrder.push(k);
+        }
+      }
+
+      for (const k of keysOrder) {
+        const val = formValues[k] ?? '';
+        let label = k;
+        if (k === 'documentNumber') label = 'Document Number';
+        else if (k === 'name') label = 'Holder / Contact Name';
+        else if (k === 'fatherName') label = 'Father / Relative Name';
+        else if (k === 'gender') label = 'Gender';
+        else if (k === 'dateOfBirth') label = 'Date of Birth';
+        else if (k === 'address') label = 'Address';
+        else if (k === 'issueDate') label = 'Issue Date';
+        else if (k === 'expiryDate') label = 'Expiry Date';
+        else {
+          label = k
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/_/g, ' ')
+            .replace(/^\w/, c => c.toUpperCase())
+            .trim();
+        }
+
+        fields.push({
+          key: k,
+          label,
+          value: val,
+          placeholder: `Enter ${label.toLowerCase()}`,
+          isRemovable: true,
+          multiline: k.toLowerCase().includes('address') || k.toLowerCase().includes('spec') || k.toLowerCase().includes('feature'),
+        });
+      }
+    }
+
+    return fields;
+  };
+
   const handleOpenDocDetails = (doc: DocumentMetadata) => {
-    console.log(`[Vault] Loading document: ${doc.documentName}`);
-    console.log(`[Vault] Loading document image: ${doc.id}`);
     setSelectedDoc(doc);
-    setEditName(doc.documentName);
-    setEditType(doc.documentType);
-    setEditNumber(doc.documentNumber || '');
-    setEditIssueDate(doc.issueDate || '');
-    setEditExpiryDate(doc.expiryDate || '');
+    const initialVals = buildInitialFormValues(doc);
+    setEditFormValues(initialVals);
+    setEditName(doc.documentName || '');
+    setIsAddingField(false);
+    setNewFieldKey('');
+    setNewFieldValue('');
+    setIsEditMode(false);
+
+    const rendered = getRenderedFields(doc, initialVals);
+    console.log(`[EDIT_DOC] Document ID: ${doc.id}`);
+    console.log(`[EDIT_DOC] Document type: ${doc.documentType}`);
+    console.log(`[EDIT_DOC] Saved fields: ${JSON.stringify(Object.keys(doc.fields || {}))}`);
+    console.log(`[EDIT_DOC] Fields rendered: ${rendered.map(f => f.key).join(', ')}`);
+  };
+
+  const handleCancelEdit = () => {
+    if (selectedDoc) {
+      setEditName(selectedDoc.documentName || '');
+      setEditFormValues(buildInitialFormValues(selectedDoc));
+    }
+    setIsAddingField(false);
+    setNewFieldKey('');
+    setNewFieldValue('');
     setIsEditMode(false);
   };
 
   const handleCloseModal = () => {
     setSelectedDoc(null);
     setIsEditMode(false);
-  };
-
-  const handleViewPdf = async (doc: DocumentMetadata) => {
-    setIsViewingPdf(true);
-    try {
-      const pdfUri = await pdfService.generateDocumentPdf(doc);
-      console.log(`[PDF] View PDF generated at: ${pdfUri}`);
-      const supported = await Linking.canOpenURL(pdfUri).catch(() => true);
-      if (supported) {
-        await Linking.openURL(pdfUri);
-      } else {
-        await pdfService.sharePdf(doc);
-      }
-    } catch (err: any) {
-      Alert.alert('Unable to View PDF', err?.message || 'Could not open PDF viewer.');
-    } finally {
-      setIsViewingPdf(false);
-    }
-  };
-
-  const handleDownloadPdf = async (doc: DocumentMetadata) => {
-    setIsDownloadingPdf(true);
-    try {
-      const savedPath = await pdfService.downloadPdfToDevice(doc);
-      Alert.alert(
-        'PDF Saved Successfully',
-        `The document PDF has been downloaded and saved to your device!\n\nLocation: ${savedPath}`,
-        [{ text: 'OK' }]
-      );
-    } catch (err: any) {
-      Alert.alert('Unable to Generate PDF', err?.message || 'Could not download PDF.');
-    } finally {
-      setIsDownloadingPdf(false);
-    }
-  };
-
-  const handleSharePdf = async (doc: DocumentMetadata) => {
-    setIsSharingPdf(true);
-    try {
-      await pdfService.sharePdf(doc);
-    } catch (err: any) {
-      if (err?.message !== 'User cancelled') {
-        Alert.alert('Unable to Share PDF', err?.message || 'Could not share PDF.');
-      }
-    } finally {
-      setIsSharingPdf(false);
-    }
+    setIsAddingField(false);
   };
 
   const handleSaveEdit = async () => {
@@ -154,18 +341,106 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
       return;
     }
 
+    // Document-specific validation
+    const aadhaarVal = editFormValues['aadhaarNumber'] || editFormValues['aadhaar'];
+    if (aadhaarVal && aadhaarVal.trim()) {
+      const digitsOnly = aadhaarVal.replace(/\s+/g, '');
+      if (!/^\d{12}$/.test(digitsOnly)) {
+        Alert.alert('Validation Error', 'Aadhaar Number must be a valid 12-digit number.');
+        return;
+      }
+    }
+
+    const panVal = editFormValues['panNumber'] || editFormValues['pan'];
+    if (panVal && panVal.trim()) {
+      if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/i.test(panVal.trim())) {
+        Alert.alert('Validation Error', 'PAN Number must be in the format ABCDE1234F.');
+        return;
+      }
+    }
+
+    console.log(`[DOCUMENT_EDIT] Save requested: ${selectedDoc.id}`);
     setIsSaving(true);
     try {
-      await documentService.updateDocument(user.uid, selectedDoc.id, {
-        documentName: editName.trim(),
-        documentType: editType,
-        documentNumber: editNumber.trim(),
-        issueDate: editIssueDate.trim(),
-        expiryDate: editExpiryDate.trim(),
-      });
+      const cleanFields: Record<string, string> = {};
+      for (const [k, v] of Object.entries(editFormValues)) {
+        const tk = k.trim();
+        const tv = typeof v === 'string' ? v.trim() : String(v || '').trim();
+        if (tk && tv && !/^[*_\-\s:]+$/.test(tv)) {
+          cleanFields[tk] = tv;
+        }
+      }
 
-      Alert.alert('Success', 'Document updated successfully.');
-      handleCloseModal();
+      const findFieldVal = (...keys: string[]): string | undefined => {
+        for (const k of keys) {
+          const matchingKey = Object.keys(cleanFields).find(ck => ck.toLowerCase() === k.toLowerCase());
+          if (matchingKey && cleanFields[matchingKey]) {
+            return cleanFields[matchingKey];
+          }
+        }
+        return undefined;
+      };
+
+      const docNumber = findFieldVal(
+        'documentNumber', 'aadhaarNumber', 'panNumber', 'passportNumber',
+        'epicNumber', 'voterIdNumber', 'licenceNumber', 'registrationNumber',
+        'policyNumber', 'rollNumber', 'accountNumber'
+      ) ?? selectedDoc.documentNumber ?? undefined;
+
+      const holderName = findFieldVal(
+        'name', 'fullName', 'holderName', 'ownerName', 'studentName', 'patientName', 'accountHolderName'
+      ) ?? selectedDoc.name ?? undefined;
+
+      const fatherName = findFieldVal(
+        'fatherName', 'husbandName', 'guardianName'
+      ) ?? selectedDoc.fatherName ?? undefined;
+
+      const gender = findFieldVal(
+        'gender', 'sex'
+      ) ?? selectedDoc.gender ?? undefined;
+
+      const dateOfBirth = findFieldVal(
+        'dateOfBirth', 'dob'
+      ) ?? selectedDoc.dateOfBirth ?? undefined;
+
+      const address = findFieldVal(
+        'address'
+      ) ?? selectedDoc.address ?? undefined;
+
+      const issueDate = findFieldVal(
+        'issueDate'
+      ) ?? selectedDoc.issueDate ?? undefined;
+
+      const expiryDate = findFieldVal(
+        'expiryDate'
+      ) ?? selectedDoc.expiryDate ?? undefined;
+
+      const updatePayload: Partial<DocumentMetadata> = {
+        documentName: editName.trim(),
+        documentType: selectedDoc.documentType,
+        documentNumber: docNumber,
+        name: holderName,
+        fatherName: fatherName,
+        gender: gender,
+        address: address,
+        dateOfBirth: dateOfBirth,
+        issueDate: issueDate,
+        expiryDate: expiryDate,
+        fields: Object.keys(cleanFields).length > 0 ? cleanFields : undefined,
+      };
+
+      await documentService.updateDocument(user.uid, selectedDoc.id, updatePayload);
+
+      const updatedDoc: DocumentMetadata = {
+        ...selectedDoc,
+        ...updatePayload,
+        fields: cleanFields,
+        updatedAt: new Date().toISOString(),
+      };
+      setSelectedDoc(updatedDoc);
+
+      Alert.alert('Saved', 'Document details updated successfully.');
+      setIsEditMode(false);
       fetchDocs();
     } catch (err: any) {
       Alert.alert('Update Failed', err?.message || 'Could not update document.');
@@ -199,6 +474,328 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
     );
   };
 
+  // Helper to convert any image source (http/https remote or file://) to a Base64 Data URL for PDF HTML embedding
+  const getImageBase64DataUrl = async (imageUri: string): Promise<string | null> => {
+    try {
+      let localPath = imageUri;
+
+      if (imageUri.startsWith('http://') || imageUri.startsWith('https://')) {
+        const tempName = `temp_pdf_${Date.now()}.jpg`;
+        const cachePath = `${cacheDirectory}${tempName}`;
+        const downloadRes = await downloadAsync(imageUri, cachePath);
+        localPath = downloadRes.uri;
+      }
+
+      const base64 = await readAsStringAsync(localPath, {
+        encoding: EncodingType.Base64,
+      });
+
+      return `data:image/jpeg;base64,${base64}`;
+    } catch (err) {
+      return null;
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // PDF Export & Native Sharing Logic
+  // ---------------------------------------------------------------------------
+
+  const buildDynamicPdfRows = (doc: DocumentMetadata): string => {
+    const rows: { label: string; value: string }[] = [];
+
+    rows.push({ label: 'Document Name', value: doc.documentName });
+    rows.push({ label: 'Type', value: doc.documentType });
+
+    if (doc.documentNumber && doc.documentNumber.trim()) {
+      rows.push({ label: 'Document Number', value: doc.documentNumber.trim() });
+    }
+    if (doc.name && doc.name.trim()) {
+      rows.push({ label: 'Holder Name', value: doc.name.trim() });
+    }
+    if (doc.fatherName && doc.fatherName.trim()) {
+      rows.push({ label: 'Father / Relative Name', value: doc.fatherName.trim() });
+    }
+    if (doc.gender && doc.gender.trim()) {
+      rows.push({ label: 'Gender', value: doc.gender.trim() });
+    }
+    if (doc.dateOfBirth && doc.dateOfBirth.trim()) {
+      rows.push({ label: 'Date of Birth', value: doc.dateOfBirth.trim() });
+    }
+    if (doc.address && doc.address.trim()) {
+      rows.push({ label: 'Address', value: doc.address.trim() });
+    }
+    if (doc.issueDate && doc.issueDate.trim()) {
+      rows.push({ label: 'Issue Date', value: doc.issueDate.trim() });
+    }
+    if (doc.expiryDate && doc.expiryDate.trim()) {
+      rows.push({ label: 'Expiry Date', value: doc.expiryDate.trim() });
+    }
+
+    if (doc.fields && typeof doc.fields === 'object') {
+      Object.entries(doc.fields).forEach(([key, val]) => {
+        if (val && typeof val === 'string' && val.trim()) {
+          const formattedLabel = key
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/_/g, ' ')
+            .replace(/^\w/, c => c.toUpperCase())
+            .trim();
+
+          const exists = rows.some(r => r.label.toLowerCase() === formattedLabel.toLowerCase());
+          if (!exists) {
+            rows.push({ label: formattedLabel, value: val.trim() });
+          }
+        }
+      });
+    }
+
+    return rows
+      .map(r => `<tr><th>${r.label}</th><td>${r.value}</td></tr>`)
+      .join('\n            ');
+  };
+
+  interface GeneratedPdfResult {
+    rawUri: string;
+    localPdfUri: string;
+    base64Data: string;
+    fileName: string;
+  }
+
+  const generatePdfFile = async (doc: DocumentMetadata, fileName: string): Promise<GeneratedPdfResult> => {
+    console.log(`[PDF Log 1] Generating PDF for: ${doc.documentName}`);
+
+    // Prioritize cropped image path over original raw image
+    const rawImageSource = doc.croppedImagePath || doc.localFileUri || doc.fileUrl;
+    console.log(`[PDF Log 1.1] Resolved Cropped Image Source: ${rawImageSource || 'None'}`);
+
+    let base64ImageDataUrl: string | null = null;
+
+    if (rawImageSource) {
+      base64ImageDataUrl = await getImageBase64DataUrl(rawImageSource);
+      console.log(`[PDF Log 1.2] Base64 image status: ${base64ImageDataUrl ? 'Converted' : 'Failed'}`);
+    }
+
+    const dynamicTableRows = buildDynamicPdfRows(doc);
+
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>${doc.documentName}</title>
+          <style>
+            body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 30px; color: #1e293b; }
+            .header { border-bottom: 2px solid #1e3a8a; padding-bottom: 12px; margin-bottom: 20px; }
+            .title { font-size: 24px; font-weight: bold; color: #1e3a8a; margin: 0; }
+            .subtitle { font-size: 14px; color: #64748b; margin-top: 4px; }
+            .table { width: 100%; border-collapse: collapse; margin-top: 15px; margin-bottom: 25px; }
+            .table th, .table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e2e8f0; }
+            .table th { background-color: #f8fafc; font-size: 13px; color: #475569; width: 35%; }
+            .table td { font-size: 14px; font-weight: 500; }
+            .image-container { text-align: center; margin-top: 20px; page-break-inside: avoid; }
+            .doc-image { max-width: 100%; max-height: 450px; border-radius: 8px; border: 1px solid #cbd5e1; margin-top: 10px; }
+            .footer { margin-top: 30px; font-size: 11px; color: #94a3b8; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1 class="title">${doc.documentName}</h1>
+            <div class="subtitle">Type: ${doc.documentType} | Digital Document Assistant</div>
+          </div>
+
+          <table class="table">
+            ${dynamicTableRows}
+          </table>
+
+          ${base64ImageDataUrl ? `
+            <div class="image-container">
+              <h3 style="color: #1e3a8a; font-size: 14px;">CROPPED DOCUMENT IMAGE</h3>
+              <img src="${base64ImageDataUrl}" class="doc-image" />
+            </div>
+          ` : ''}
+
+          <div class="footer">
+            Generated securely by Digital Document Assistant • ${new Date().toLocaleDateString()}
+          </div>
+        </body>
+      </html>
+    `;
+
+    console.log('[PDF Log 1.3] Calling Print.printToFileAsync for binary PDF');
+    const printResult = await Print.printToFileAsync({ html: htmlContent, base64: true });
+    const generatedUri = printResult.uri;
+    const uriScheme = generatedUri.includes(':') ? generatedUri.split(':')[0] : 'unknown';
+    const rawFilename = generatedUri.split('/').pop() || 'unknown';
+
+    console.log(`[PDF_DIAG] generated URI: ${generatedUri}`);
+    console.log(`[PDF_DIAG] URI scheme: ${uriScheme}`);
+    console.log(`[PDF_DIAG] filename: ${rawFilename}`);
+
+    try {
+      const sourceInfo = await getInfoAsync(generatedUri);
+      console.log(`[PDF_DIAG] source exists: ${sourceInfo.exists}`);
+      console.log(`[PDF_DIAG] source readable: ${sourceInfo.exists ? 'true' : 'false'}`);
+      console.log(`[PDF_DIAG] source size: ${sourceInfo.exists ? (sourceInfo as any).size ?? 0 : 0}`);
+    } catch (checkErr: any) {
+      console.log(`[PDF_DIAG] source exists: false`);
+      console.log(`[PDF_DIAG] source readable: false`);
+      console.log(`[PDF_DIAG] source size: 0`);
+    }
+
+    console.log(`[PDF SHARE] SOURCE_URI: ${generatedUri}`);
+    const baseDir = cacheDirectory || documentDirectory;
+    const destUri = `${baseDir}${Date.now()}_${fileName}`;
+    console.log(`[PDF SHARE] DESTINATION_URI: ${destUri}`);
+
+    const base64Data = printResult.base64 || '';
+    if (base64Data) {
+      await writeAsStringAsync(destUri, base64Data, { encoding: EncodingType.Base64 });
+    } else {
+      await copyAsync({ from: generatedUri, to: destUri });
+    }
+
+    const info = await getInfoAsync(destUri);
+    const exists = info.exists;
+    const size = info.exists ? (info as any).size ?? 0 : 0;
+
+    console.log(`[PDF SHARE] DESTINATION_EXISTS: ${exists}`);
+    console.log(`[PDF SHARE] DESTINATION_SIZE: ${size}`);
+
+    if (!exists || size === 0) {
+      throw new Error(`Copied PDF file is invalid or empty at ${destUri}`);
+    }
+
+    return {
+      rawUri: generatedUri,
+      localPdfUri: destUri,
+      base64Data,
+      fileName,
+    };
+  };
+
+  const handleSavePdf = async () => {
+    if (!selectedDoc) return;
+    console.log(`[PDF Log 2] handleSavePdf triggered for: ${selectedDoc.documentName}`);
+    setIsExporting(true);
+
+    try {
+      const sanitizedDocNumber = (selectedDoc.documentNumber || 'Document').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const sanitizedDocType = selectedDoc.documentType.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const fileName = `${sanitizedDocType}_${sanitizedDocNumber}.pdf`;
+
+      const pdfPromise = generatePdfFile(selectedDoc, fileName);
+      const timeoutPromise = new Promise<GeneratedPdfResult>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
+      );
+
+      const pdfResult = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 2.1] App-readable PDF URI ready for save: ${pdfResult.localPdfUri}`);
+
+      if (Platform.OS === 'android' && StorageAccessFramework) {
+        try {
+          console.log('[PDF Log 2.2] Requesting StorageAccessFramework directory permissions');
+          const saf = StorageAccessFramework;
+          const permissions = await saf.requestDirectoryPermissionsAsync();
+          if (permissions.granted) {
+            console.log('[PDF Log 2.3] Directory permissions granted. Writing file.');
+            const newFileUri = await saf.createFileAsync(
+              permissions.directoryUri,
+              fileName,
+              'application/pdf'
+            );
+            await writeAsStringAsync(newFileUri, pdfResult.base64Data, { encoding: EncodingType.Base64 });
+            console.log(`[PDF Log 2.4] PDF saved successfully via SAF: ${newFileUri}`);
+            Alert.alert('PDF Saved', `PDF saved successfully as "${fileName}".`);
+            return;
+          }
+        } catch (safErr: any) {
+          console.warn(`[PDF Log 2.5] SAF Save fallback: ${safErr?.message}`);
+        }
+      }
+
+      if (await Sharing.isAvailableAsync()) {
+        console.log('[PDF SHARE] SHARE_START: Using Sharing dialog to save PDF');
+        await Sharing.shareAsync(pdfResult.localPdfUri, { mimeType: 'application/pdf', dialogTitle: `Save ${fileName}` });
+        console.log('[PDF SHARE] SHARE_SUCCESS: PDF saved via Sharing dialog');
+        Alert.alert('PDF Saved', 'PDF file ready and saved successfully.');
+      } else {
+        Alert.alert('PDF Saved', `PDF file generated successfully at ${pdfResult.localPdfUri}`);
+      }
+    } catch (err: any) {
+      console.error('[PDF Log 2.7] handleSavePdf error:', err);
+      Alert.alert('Save PDF Failed', err?.message || 'Could not save PDF.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleSharePdf = async () => {
+    if (!selectedDoc) return;
+    console.log(`[PDF Log 3] handleSharePdf triggered for: ${selectedDoc.documentName}`);
+    setIsExporting(true);
+
+    try {
+      const sanitizedDocNumber = (selectedDoc.documentNumber || 'Document').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const sanitizedDocType = selectedDoc.documentType.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const fileName = `${sanitizedDocType}_${sanitizedDocNumber}.pdf`;
+
+      const pdfPromise = generatePdfFile(selectedDoc, fileName);
+      const timeoutPromise = new Promise<GeneratedPdfResult>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF generation timed out after 15 seconds.')), 15000)
+      );
+
+      const pdfResult = await Promise.race([pdfPromise, timeoutPromise]);
+      console.log(`[PDF Log 3.1] App-readable PDF URI ready for sharing: ${pdfResult.localPdfUri}`);
+
+      if (await Sharing.isAvailableAsync()) {
+        console.log('[PDF SHARE] SHARE_START: Launching native Share sheet with mimeType application/pdf');
+        await Sharing.shareAsync(pdfResult.localPdfUri, {
+          mimeType: 'application/pdf',
+          dialogTitle: `Share ${selectedDoc.documentName} PDF`,
+          UTI: 'com.adobe.pdf',
+        });
+        console.log('[PDF SHARE] SHARE_SUCCESS: Share sheet launched successfully');
+      } else {
+        Alert.alert('Sharing Unavailable', 'Native sharing is not supported on this device.');
+      }
+    } catch (err: any) {
+      console.error('[PDF Log 3.4] handleSharePdf error:', err);
+      if (err?.message !== 'User cancelled') {
+        Alert.alert('Unable to Share PDF', err?.message || 'Could not share PDF.');
+      }
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleShareImage = async () => {
+    if (!selectedDoc) return;
+    const imageSource = selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri;
+    if (!imageSource) {
+      Alert.alert('No Image', 'No image file is attached to this document.');
+      return;
+    }
+
+    try {
+      let localPath = imageSource;
+      if (imageSource.startsWith('http://') || imageSource.startsWith('https://')) {
+        const cachePath = `${cacheDirectory}share_${Date.now()}.jpg`;
+        const downloadRes = await downloadAsync(imageSource, cachePath);
+        localPath = downloadRes.uri;
+      }
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(localPath, {
+          mimeType: 'image/jpeg',
+          dialogTitle: `Share ${selectedDoc.documentName} Image`,
+        });
+      } else {
+        Alert.alert('Sharing Unavailable', 'Native sharing is not supported on this device.');
+      }
+    } catch (err: any) {
+      Alert.alert('Share Image Failed', err?.message || 'Could not share image.');
+    }
+  };
+
   const filteredDocs = documents.filter((doc) => {
     const matchesCategory =
       selectedCategory === 'ALL' || doc.documentType === selectedCategory;
@@ -211,7 +808,7 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
   });
 
   if (isLoading) {
-    return <LoadingIndicator message="Loading document vault..." />;
+    return <LoadingIndicator message="Loading personal vault..." />;
   }
 
   return (
@@ -279,54 +876,32 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
             }
           />
         ) : (
-          filteredDocs.map((doc) => {
-            const imageUrl = documentService.getDocumentImageUrl(doc.id, doc.imagePath, doc.localFileUri, doc.croppedImagePath);
-            const hasError = imageErrorMap[doc.id];
-
-            return (
-              <TouchableOpacity
-                key={doc.id}
-                style={styles.card}
-                activeOpacity={0.8}
-                onPress={() => handleOpenDocDetails(doc)}
-              >
-                <View style={styles.cardHeader}>
-                  <View style={styles.categoryBadge}>
-                    <Text style={styles.categoryText}>{doc.documentType}</Text>
-                  </View>
-                  <Text style={styles.dateText}>
-                    {doc.issueDate ? `Issued: ${doc.issueDate}` : 'Secured'}
-                  </Text>
+          filteredDocs.map((doc) => (
+            <TouchableOpacity
+              key={doc.id}
+              style={styles.card}
+              activeOpacity={0.8}
+              onPress={() => handleOpenDocDetails(doc)}
+            >
+              <View style={styles.cardHeader}>
+                <View style={styles.categoryBadge}>
+                  <Text style={styles.categoryText}>{doc.documentType}</Text>
                 </View>
-                <Text style={styles.cardTitle}>{doc.documentName}</Text>
-                <Text style={styles.cardNumber}>
-                  {doc.documentNumber || (doc.fileName ? `File: ${doc.fileName}` : 'Saved in Vault')}
+                <Text style={styles.dateText}>
+                  {doc.issueDate ? `Issued: ${doc.issueDate}` : 'Secured'}
                 </Text>
-                {doc.expiryDate ? (
-                  <Text style={styles.expiryText}>
-                    Expires: <Text style={styles.expiryDate}>{doc.expiryDate}</Text>
-                  </Text>
-                ) : null}
-
-                {/* Cropped Document Image Preview in Card */}
-                {imageUrl && !hasError ? (
-                  <View style={styles.cardImageContainer}>
-                    <Image
-                      source={{
-                        uri: imageUrl,
-                        headers: user?.uid ? { 'x-user-id': user.uid } : undefined,
-                      }}
-                      style={styles.cardImage}
-                      resizeMode="cover"
-                      onError={() =>
-                        setImageErrorMap((prev) => ({ ...prev, [doc.id]: true }))
-                      }
-                    />
-                  </View>
-                ) : null}
-              </TouchableOpacity>
-            );
-          })
+              </View>
+              <Text style={styles.cardTitle}>{doc.documentName}</Text>
+              <Text style={styles.cardNumber}>
+                {doc.documentNumber || (doc.fileName ? `File: ${doc.fileName}` : 'Saved in Vault')}
+              </Text>
+              {doc.expiryDate ? (
+                <Text style={styles.expiryText}>
+                  Expires: <Text style={styles.expiryDate}>{doc.expiryDate}</Text>
+                </Text>
+              ) : null}
+            </TouchableOpacity>
+          ))
         )}
       </ScrollView>
 
@@ -353,27 +928,13 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
                 {!isEditMode ? (
                   // Read-Only Detail View
                   <View>
-                    {/* Cropped Document Image Preview in Modal */}
-                    {documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri, selectedDoc.croppedImagePath) ? (
-                      <View style={styles.modalImageWrapper}>
-                        <Image
-                          source={{
-                            uri: documentService.getDocumentImageUrl(selectedDoc.id, selectedDoc.imagePath, selectedDoc.localFileUri, selectedDoc.croppedImagePath),
-                            headers: user?.uid ? { 'x-user-id': user.uid } : undefined,
-                          }}
-                          style={styles.modalImage}
-                          resizeMode="contain"
-                        />
-                      </View>
-                    ) : null}
-
                     <View style={styles.detailRow}>
                       <Text style={styles.detailLabel}>Document Name</Text>
                       <Text style={styles.detailValue}>{selectedDoc.documentName}</Text>
                     </View>
 
                     <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Type</Text>
+                      <Text style={styles.detailLabel}>Document Type</Text>
                       <Text style={styles.detailValue}>{selectedDoc.documentType}</Text>
                     </View>
 
@@ -433,171 +994,240 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
                       </View>
                     ) : null}
 
-                    {/* Render all dynamic AI-extracted fields */}
-                    {selectedDoc.fields && typeof selectedDoc.fields === 'object'
-                      ? Object.entries(selectedDoc.fields).map(([key, val]) => {
-                          if (!val || typeof val !== 'string' || !val.trim()) return null;
-                          const formattedLabel = key
-                            .replace(/([A-Z])/g, ' $1')
-                            .replace(/_/g, ' ')
-                            .replace(/^\w/, c => c.toUpperCase())
-                            .trim();
+                    {/* Display All Saved Dynamic Fields */}
+                    {selectedDoc.fields && Object.keys(selectedDoc.fields).length > 0 ? (
+                      <View style={styles.fieldsSection}>
+                        <Text style={styles.fieldsSectionTitle}>Extracted Information</Text>
+                        {Object.entries(selectedDoc.fields).map(([k, v]) => (
+                          <View key={k} style={styles.detailRow}>
+                            <Text style={styles.detailLabel}>{k.replace(/_/g, ' ')}</Text>
+                            <Text style={styles.detailValue}>{v}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
 
-                          // Avoid repeating standard fields already shown above
-                          const lower = formattedLabel.toLowerCase();
-                          if (
-                            lower === 'document name' ||
-                            lower === 'document type' ||
-                            lower === 'type' ||
-                            lower === 'document number' ||
-                            lower === 'name' ||
-                            lower === 'holder name' ||
-                            lower === 'father name' ||
-                            lower === 'father / relative name' ||
-                            lower === 'gender' ||
-                            lower === 'date of birth' ||
-                            lower === 'address' ||
-                            lower === 'issue date' ||
-                            lower === 'expiry date'
-                          ) {
-                            return null;
-                          }
+                    {/* Cropped Document Image Preview */}
+                    {(selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri) ? (
+                      <View style={styles.imagePreviewSection}>
+                        <Text style={styles.fieldsSectionTitle}>Document Image</Text>
+                        <TouchableOpacity
+                          activeOpacity={0.9}
+                          onPress={() => setPreviewImageUri(selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri || null)}
+                        >
+                          <Image
+                            source={{ uri: selectedDoc.croppedImagePath || selectedDoc.fileUrl || selectedDoc.localFileUri }}
+                            style={styles.docPreviewImage}
+                            resizeMode="cover"
+                          />
+                          <Text style={styles.tapToEnlarge}>Tap to view full screen</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
 
-                          return (
-                            <View key={key} style={styles.detailRow}>
-                              <Text style={styles.detailLabel}>{formattedLabel}</Text>
-                              <Text style={styles.detailValue}>{val.trim()}</Text>
-                            </View>
-                          );
-                        })
-                      : null}
+                    {/* Actions: Save PDF, Share PDF, Share Image, Edit, Delete */}
+                    <View style={styles.modalActionStack}>
+                      <View style={styles.buttonRow}>
+                        <Button
+                          title="📥 Download PDF"
+                          onPress={handleSavePdf}
+                          isLoading={isExporting}
+                          variant="primary"
+                          style={{ flex: 1, marginRight: 4 }}
+                        />
+                        <Button
+                          title="📤 Share PDF"
+                          onPress={handleSharePdf}
+                          isLoading={isExporting}
+                          variant="outlined"
+                          style={{ flex: 1, marginHorizontal: 4 }}
+                        />
+                        <Button
+                          title="🖼️ Share Image"
+                          onPress={handleShareImage}
+                          variant="outlined"
+                          style={{ flex: 1, marginLeft: 4 }}
+                        />
+                      </View>
 
-                    {/* PDF Actions */}
-                    <View style={styles.pdfActionsRow}>
-                      <Button
-                        title={isViewingPdf ? 'Opening...' : '📄 View PDF'}
-                        onPress={() => handleViewPdf(selectedDoc)}
-                        isLoading={isViewingPdf}
-                        variant="outlined"
-                        style={{ flex: 1, marginRight: 4 }}
-                      />
-                      <Button
-                        title={isDownloadingPdf ? 'Saving...' : '📥 Download PDF'}
-                        onPress={() => handleDownloadPdf(selectedDoc)}
-                        isLoading={isDownloadingPdf}
-                        variant="primary"
-                        style={{ flex: 1, marginHorizontal: 4 }}
-                      />
-                      <Button
-                        title={isSharingPdf ? 'Sharing...' : '📤 Share PDF'}
-                        onPress={() => handleSharePdf(selectedDoc)}
-                        isLoading={isSharingPdf}
-                        variant="outlined"
-                        style={{ flex: 1, marginLeft: 4 }}
-                      />
-                    </View>
-
-                    {/* Edit & Delete Actions */}
-                    <View style={styles.modalActionsRow}>
-                      <Button
-                        title="🤖 Ask AI"
-                        onPress={() => {
-                          const doc = selectedDoc;
-                          setSelectedDoc(null);
-                          let fieldsObj = {};
-                          if (doc.fields) {
-                            try {
-                              fieldsObj = typeof doc.fields === 'string' ? JSON.parse(doc.fields) : doc.fields;
-                            } catch (e) {
-                              fieldsObj = {};
+                      <View style={[styles.buttonRow, { marginTop: 10 }]}>
+                        <Button
+                          title="🤖 Ask AI"
+                          onPress={() => {
+                            const doc = selectedDoc;
+                            setSelectedDoc(null);
+                            let fieldsObj = {};
+                            if (doc.fields) {
+                              try {
+                                fieldsObj = typeof doc.fields === 'string' ? JSON.parse(doc.fields) : doc.fields;
+                              } catch (e) {
+                                fieldsObj = {};
+                              }
                             }
-                          }
-                          navigation?.navigate?.('Assistant', {
-                            documentId: doc.id,
-                            documentType: doc.documentType,
-                            documentName: doc.documentName,
-                            extractedFields: fieldsObj,
-                          });
-                        }}
-                        variant="primary"
-                        style={{ flex: 1, marginRight: 4 }}
-                      />
-                      <Button
-                        title="✏️ Edit"
-                        onPress={() => setIsEditMode(true)}
-                        variant="outlined"
-                        style={{ flex: 1, marginHorizontal: 3 }}
-                      />
-                      <Button
-                        title="🗑️ Delete"
-                        onPress={() => handleDeleteDoc(selectedDoc)}
-                        variant="outlined"
-                        style={{ flex: 1, marginLeft: 4 }}
-                      />
+                            navigation?.navigate?.('Assistant', {
+                              documentId: doc.id,
+                              documentType: doc.documentType,
+                              documentName: doc.documentName,
+                              extractedFields: fieldsObj,
+                            });
+                          }}
+                          variant="primary"
+                          style={{ flex: 1, marginRight: 4 }}
+                        />
+                        <Button
+                          title="✏️ Edit"
+                          onPress={() => {
+                            setIsEditMode(true);
+                            if (selectedDoc) {
+                              const rendered = getRenderedFields(selectedDoc, editFormValues);
+                              console.log(`[EDIT_DOC] Document ID: ${selectedDoc.id}`);
+                              console.log(`[EDIT_DOC] Document type: ${selectedDoc.documentType}`);
+                              console.log(`[EDIT_DOC] Saved fields: ${JSON.stringify(Object.keys(selectedDoc.fields || {}))}`);
+                              console.log(`[EDIT_DOC] Fields rendered: ${rendered.map(f => f.key).join(', ')}`);
+                            }
+                          }}
+                          variant="outlined"
+                          style={{ flex: 1, marginHorizontal: 3 }}
+                        />
+                        <Button
+                          title="🗑️ Delete"
+                          onPress={() => handleDeleteDoc(selectedDoc)}
+                          variant="outlined"
+                          style={{ flex: 1, marginLeft: 4 }}
+                        />
+                      </View>
                     </View>
                   </View>
                 ) : (
-                  // Edit Form View
+                  // Edit Form View — Dynamic Document-Specific Fields
                   <View>
                     <Input
-                      label="Document Name"
+                      label="Document Name *"
                       value={editName}
                       onChangeText={setEditName}
-                      placeholder="e.g. Aadhaar Card"
+                      placeholder="e.g. My Document"
                     />
 
-                    <Text style={styles.fieldLabel}>Document Type</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
-                      {(['Aadhaar', 'PAN', 'Passport', 'DrivingLicence', 'VehicleRC', 'Insurance', 'EducationalCertificate', 'Other'] as DocumentCategory[]).map((cat) => (
-                        <TouchableOpacity
-                          key={cat}
-                          style={[
-                            styles.chip,
-                            editType === cat && styles.chipSelected,
-                          ]}
-                          onPress={() => setEditType(cat)}
-                        >
-                          <Text style={[styles.chipText, editType === cat && styles.chipTextSelected]}>
-                            {cat}
-                          </Text>
-                        </TouchableOpacity>
+                    <View style={styles.fieldsSection}>
+                      <Text style={styles.fieldsSectionTitle}>
+                        {resolveTemplateKey(selectedDoc.documentType, selectedDoc.documentName)
+                          ? `${resolveTemplateKey(selectedDoc.documentType, selectedDoc.documentName)} Information`
+                          : 'Document Information'}
+                      </Text>
+
+                      {getRenderedFields(selectedDoc, editFormValues).map((field) => (
+                        <View key={field.key} style={styles.dynamicFieldRow}>
+                          <View style={styles.dynamicFieldHeader}>
+                            <Text style={styles.dynamicFieldLabel}>
+                              {field.label}
+                              {field.required ? ' *' : ''}
+                            </Text>
+                            {field.isRemovable ? (
+                              <TouchableOpacity
+                                onPress={() => {
+                                  setEditFormValues((prev) => {
+                                    const copy = { ...prev };
+                                    delete copy[field.key];
+                                    return copy;
+                                  });
+                                }}
+                              >
+                                <Text style={styles.removeFieldText}>✕ Remove</Text>
+                              </TouchableOpacity>
+                            ) : null}
+                          </View>
+                          <Input
+                            value={field.value}
+                            onChangeText={(text) => {
+                              setEditFormValues((prev) => ({
+                                ...prev,
+                                [field.key]: text,
+                              }));
+                            }}
+                            placeholder={field.placeholder || `Enter ${field.label.toLowerCase()}`}
+                            multiline={field.multiline}
+                          />
+                        </View>
                       ))}
-                    </ScrollView>
 
-                    <Input
-                      label="Document Number"
-                      value={editNumber}
-                      onChangeText={setEditNumber}
-                      placeholder="e.g. XXXX-XXXX-1234"
-                    />
+                      {getRenderedFields(selectedDoc, editFormValues).length === 0 ? (
+                        <Text style={{ fontSize: 13, color: theme.colors.textMuted, marginVertical: 8 }}>
+                          No specific fields were saved for this document. You can add details below.
+                        </Text>
+                      ) : null}
 
-                    <Input
-                      label="Issue Date (Optional)"
-                      value={editIssueDate}
-                      onChangeText={setEditIssueDate}
-                      placeholder="YYYY-MM-DD"
-                    />
+                      {/* Add Custom Field Inline Card */}
+                      {isAddingField ? (
+                        <View style={styles.addFieldBox}>
+                          <Text style={styles.addFieldBoxTitle}>Add Custom Field</Text>
+                          <Input
+                            label="Field Name"
+                            value={newFieldKey}
+                            onChangeText={setNewFieldKey}
+                            placeholder="e.g. RAM, Storage, Model"
+                          />
+                          <Input
+                            label="Field Value"
+                            value={newFieldValue}
+                            onChangeText={setNewFieldValue}
+                            placeholder="e.g. 16 GB, 512 GB SSD"
+                          />
+                          <View style={styles.addFieldButtonRow}>
+                            <TouchableOpacity
+                              style={[styles.addFieldMiniBtn, styles.addFieldMiniBtnCancel]}
+                              onPress={() => {
+                                setIsAddingField(false);
+                                setNewFieldKey('');
+                                setNewFieldValue('');
+                              }}
+                            >
+                              <Text style={styles.addFieldMiniBtnCancelText}>Cancel</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={[styles.addFieldMiniBtn, styles.addFieldMiniBtnAdd]}
+                              onPress={() => {
+                                const k = newFieldKey.trim();
+                                const v = newFieldValue.trim();
+                                if (!k) {
+                                  Alert.alert('Validation Error', 'Field name is required.');
+                                  return;
+                                }
+                                setEditFormValues((prev) => ({
+                                  ...prev,
+                                  [k]: v,
+                                }));
+                                setNewFieldKey('');
+                                setNewFieldValue('');
+                                setIsAddingField(false);
+                              }}
+                            >
+                              <Text style={styles.addFieldMiniBtnAddText}>+ Add</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      ) : (
+                        <TouchableOpacity
+                          style={styles.addCustomFieldBtn}
+                          onPress={() => setIsAddingField(true)}
+                        >
+                          <Text style={styles.addCustomFieldBtnText}>+ Add Custom Field</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
 
-                    <Input
-                      label="Expiry Date (Optional)"
-                      value={editExpiryDate}
-                      onChangeText={setEditExpiryDate}
-                      placeholder="YYYY-MM-DD"
-                    />
-
-                    <View style={styles.modalActionsRow}>
+                    <View style={styles.modalActions}>
                       <Button
                         title="Save Changes"
                         onPress={handleSaveEdit}
                         isLoading={isSaving}
                         variant="primary"
-                        style={{ flex: 1, marginRight: 6 }}
+                        style={{ flex: 1, marginRight: 8 }}
                       />
                       <Button
                         title="Cancel"
-                        onPress={() => setIsEditMode(false)}
+                        onPress={handleCancelEdit}
                         variant="outlined"
-                        style={{ flex: 1, marginLeft: 6 }}
+                        style={{ flex: 1, marginLeft: 8 }}
                       />
                     </View>
                   </View>
@@ -605,6 +1235,30 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
               </ScrollView>
             ) : null}
           </View>
+        </View>
+      </Modal>
+
+      {/* Full Screen Image Preview Modal */}
+      <Modal
+        visible={!!previewImageUri}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setPreviewImageUri(null)}
+      >
+        <View style={styles.fullImageOverlay}>
+          <TouchableOpacity
+            style={styles.closeFullImageBtn}
+            onPress={() => setPreviewImageUri(null)}
+          >
+            <Text style={styles.closeFullImageText}>✕ Close</Text>
+          </TouchableOpacity>
+          {previewImageUri ? (
+            <Image
+              source={{ uri: previewImageUri }}
+              style={styles.fullScreenImage}
+              resizeMode="contain"
+            />
+          ) : null}
         </View>
       </Modal>
     </View>
@@ -623,33 +1277,32 @@ const styles = StyleSheet.create({
     margin: theme.spacing.md,
     paddingHorizontal: theme.spacing.md,
     borderRadius: theme.radius.md,
-    height: 48,
     borderWidth: 1,
     borderColor: theme.colors.border,
   },
   searchIcon: {
-    fontSize: 18,
+    fontSize: 16,
     marginRight: theme.spacing.xs,
   },
   searchInput: {
     flex: 1,
-    fontSize: 15,
+    height: 44,
+    fontSize: 14,
     color: theme.colors.textPrimary,
   },
   clearIcon: {
     fontSize: 14,
     color: theme.colors.textMuted,
-    padding: theme.spacing.xs,
   },
   chipWrapper: {
     paddingHorizontal: theme.spacing.md,
     marginBottom: theme.spacing.sm,
   },
   chip: {
+    backgroundColor: theme.colors.surface,
     paddingHorizontal: theme.spacing.md,
     paddingVertical: theme.spacing.xs + 2,
-    borderRadius: theme.radius.pill,
-    backgroundColor: theme.colors.surface,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: theme.colors.border,
     marginRight: theme.spacing.xs,
@@ -660,54 +1313,47 @@ const styles = StyleSheet.create({
   },
   chipText: {
     fontSize: 13,
-    fontWeight: '600',
     color: theme.colors.textSecondary,
+    fontWeight: '500',
   },
   chipTextSelected: {
-    color: theme.colors.onPrimary,
+    color: '#FFF',
+    fontWeight: '700',
   },
   errorBanner: {
-    backgroundColor: '#FEE2E2',
-    padding: theme.spacing.md,
+    backgroundColor: '#FEF2F2',
+    padding: theme.spacing.sm,
     marginHorizontal: theme.spacing.md,
-    marginBottom: theme.spacing.sm,
     borderRadius: theme.radius.sm,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: theme.spacing.sm,
   },
   errorText: {
     color: theme.colors.error,
     fontSize: 13,
-    flex: 1,
   },
   retryBtn: {
-    backgroundColor: theme.colors.error,
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: theme.radius.xs,
   },
   retryText: {
-    color: '#FFF',
+    color: theme.colors.primary,
     fontWeight: '700',
-    fontSize: 12,
   },
   listContent: {
-    padding: theme.spacing.md,
-    paddingTop: 0,
+    paddingHorizontal: theme.spacing.md,
+    paddingBottom: theme.spacing.xl,
   },
   card: {
     backgroundColor: theme.colors.surface,
     borderRadius: theme.radius.md,
     padding: theme.spacing.md,
-    marginBottom: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
     borderWidth: 1,
     borderColor: theme.colors.border,
     elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 3,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -716,10 +1362,10 @@ const styles = StyleSheet.create({
     marginBottom: theme.spacing.xs,
   },
   categoryBadge: {
-    backgroundColor: 'rgba(30, 58, 138, 0.1)',
-    paddingHorizontal: theme.spacing.xs + 4,
+    backgroundColor: 'rgba(30, 58, 138, 0.08)',
+    paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: theme.radius.xs,
+    borderRadius: 4,
   },
   categoryText: {
     fontSize: 11,
@@ -727,82 +1373,50 @@ const styles = StyleSheet.create({
     color: theme.colors.primary,
   },
   dateText: {
-    fontSize: 12,
+    fontSize: 11,
     color: theme.colors.textMuted,
   },
   cardTitle: {
     fontSize: 16,
     fontWeight: '700',
     color: theme.colors.textPrimary,
-    marginBottom: 2,
+    marginBottom: 4,
   },
   cardNumber: {
-    fontSize: 14,
+    fontSize: 13,
     color: theme.colors.textSecondary,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   expiryText: {
     fontSize: 12,
-    color: theme.colors.textSecondary,
-    marginTop: theme.spacing.xs,
+    color: theme.colors.textMuted,
+    marginTop: 6,
   },
   expiryDate: {
-    fontWeight: '700',
     color: theme.colors.warning,
+    fontWeight: '600',
   },
-
-  // Card & Modal Image Container
-  cardImageContainer: {
-    marginTop: theme.spacing.sm,
-    borderRadius: theme.radius.sm,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: '#0F172A',
-  },
-  cardImage: {
-    width: '100%',
-    height: 140,
-  },
-  modalImageWrapper: {
-    width: '100%',
-    height: 220,
-    backgroundColor: '#090D16',
-    borderRadius: theme.radius.md,
-    marginBottom: theme.spacing.md,
-    overflow: 'hidden',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-  },
-  modalImage: {
-    width: '100%',
-    height: '100%',
-  },
-
-  // Modal Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    padding: theme.spacing.md,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
   },
   modalContent: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.radius.lg,
-    maxHeight: '85%',
-    padding: theme.spacing.lg,
-    elevation: 5,
+    backgroundColor: theme.colors.background,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    maxHeight: '90%',
+    paddingBottom: theme.spacing.lg,
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: theme.spacing.md,
+    padding: theme.spacing.md,
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border,
-    paddingBottom: theme.spacing.xs,
+    backgroundColor: theme.colors.surface,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
   },
   modalTitle: {
     fontSize: 18,
@@ -815,36 +1429,185 @@ const styles = StyleSheet.create({
     padding: 4,
   },
   modalBody: {
-    marginBottom: theme.spacing.xs,
+    padding: theme.spacing.md,
   },
   detailRow: {
-    marginBottom: theme.spacing.md,
+    marginVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    paddingBottom: 6,
   },
   detailLabel: {
     fontSize: 12,
-    fontWeight: '600',
-    color: theme.colors.textMuted,
-    textTransform: 'uppercase',
-    marginBottom: 2,
+    color: theme.colors.textSecondary,
+    textTransform: 'capitalize',
   },
   detailValue: {
     fontSize: 15,
     fontWeight: '600',
     color: theme.colors.textPrimary,
+    marginTop: 2,
   },
   fieldLabel: {
     fontSize: 13,
     fontWeight: '600',
-    color: theme.colors.textSecondary,
+    color: theme.colors.textPrimary,
     marginBottom: 6,
   },
-  pdfActionsRow: {
-    flexDirection: 'row',
+  fieldsSection: {
     marginTop: theme.spacing.md,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    padding: theme.spacing.sm + 4,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  fieldsSectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: theme.colors.primary,
     marginBottom: theme.spacing.xs,
   },
-  modalActionsRow: {
+  imagePreviewSection: {
+    marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+  },
+  docPreviewImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginTop: 4,
+  },
+  tapToEnlarge: {
+    fontSize: 11,
+    color: theme.colors.primary,
+    textAlign: 'center',
+    marginTop: 4,
+    fontWeight: '600',
+  },
+  modalActionStack: {
+    marginTop: theme.spacing.md,
+  },
+  buttonRow: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    marginTop: theme.spacing.md,
+  },
+  fullImageOverlay: {
+    flex: 1,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  closeFullImageBtn: {
+    position: 'absolute',
+    top: 40,
+    right: 20,
+    zIndex: 10,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  closeFullImageText: {
+    color: '#FFF',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  fullScreenImage: {
+    width: width,
+    height: '80%',
+  },
+  dynamicFieldRow: {
+    marginBottom: theme.spacing.sm,
+    backgroundColor: theme.colors.surface,
+    padding: theme.spacing.sm,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  dynamicFieldHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  dynamicFieldLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.colors.textPrimary,
+    textTransform: 'capitalize',
+  },
+  removeFieldText: {
+    fontSize: 12,
+    color: theme.colors.error,
+    fontWeight: '600',
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+  },
+  addFieldBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: theme.radius.sm,
+    padding: theme.spacing.sm,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
     marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.sm,
+  },
+  addFieldBoxTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: theme.colors.textPrimary,
+    marginBottom: theme.spacing.xs,
+  },
+  addFieldButtonRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: theme.spacing.xs,
+    gap: 8,
+  },
+  addFieldMiniBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    borderRadius: theme.radius.sm,
+    alignItems: 'center',
+  },
+  addFieldMiniBtnCancel: {
+    backgroundColor: '#E2E8F0',
+  },
+  addFieldMiniBtnCancelText: {
+    color: theme.colors.textSecondary,
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  addFieldMiniBtnAdd: {
+    backgroundColor: theme.colors.primary,
+  },
+  addFieldMiniBtnAddText: {
+    color: '#FFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  addCustomFieldBtn: {
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: theme.colors.primary,
+    borderRadius: theme.radius.sm,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.sm,
+    backgroundColor: '#F0F9FF',
+  },
+  addCustomFieldBtnText: {
+    color: theme.colors.primary,
+    fontWeight: '700',
+    fontSize: 13,
   },
 });

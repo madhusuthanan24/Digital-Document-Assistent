@@ -37,7 +37,7 @@ import {
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { theme } from '../../constants/theme';
 import { parseExifOrientation } from '../../services/ocr/imagePreprocessor';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 export interface ManualCropResult {
   uri: string;

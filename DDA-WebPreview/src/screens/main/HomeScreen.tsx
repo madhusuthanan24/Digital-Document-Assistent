@@ -165,7 +165,7 @@ export const HomeScreen: React.FC<Props> = ({ navigation }) => {
       <View style={styles.tipCard}>
         <Text style={styles.tipTitle}>💡 Private User Vault</Text>
         <Text style={styles.tipText}>
-          Your document records are isolated strictly within your authenticated Firestore subcollection.
+          Your document records are isolated strictly within your authenticated PostgreSQL vault.
         </Text>
       </View>
     </ScrollView>

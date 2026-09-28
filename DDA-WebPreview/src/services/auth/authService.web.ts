@@ -8,13 +8,7 @@ import {
   User,
 } from 'firebase/auth';
 
-import {
-  doc,
-  setDoc,
-  serverTimestamp,
-} from 'firebase/firestore';
-
-import { auth, firestore } from '../../config/firebase';
+import { auth } from '../../config/firebase';
 import { UserProfile } from '../../types/auth';
 
 const translateFirebaseError = (code: string): string => {
@@ -112,13 +106,6 @@ class AuthService {
 
       await updateProfile(user, {
         displayName: fullName.trim(),
-      });
-
-      await setDoc(doc(firestore, 'users', user.uid), {
-        uid: user.uid,
-        fullName: fullName.trim(),
-        email: email.trim().toLowerCase(),
-        createdAt: serverTimestamp(),
       });
 
       return {

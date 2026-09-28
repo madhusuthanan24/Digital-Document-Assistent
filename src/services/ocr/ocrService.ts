@@ -153,8 +153,8 @@ export function extractJsonCandidates(text: string): string[] {
   const candidates: string[] = [];
   const unfenced = stripMarkdownFences(text);
 
-  // If the unfenced text starts with '{' and ends with '}', add as first candidate
-  if (unfenced.startsWith('{') && unfenced.endsWith('}')) {
+  // If the unfenced text starts with '{' or '[' and ends with '}' or ']', add as first candidate
+  if ((unfenced.startsWith('{') && unfenced.endsWith('}')) || (unfenced.startsWith('[') && unfenced.endsWith(']'))) {
     candidates.push(unfenced);
   }
 
@@ -163,7 +163,7 @@ export function extractJsonCandidates(text: string): string[] {
   let match: RegExpExecArray | null;
   while ((match = codeBlockRegex.exec(text)) !== null) {
     const block = match[1].trim();
-    if (block.startsWith('{') && block.endsWith('}')) {
+    if ((block.startsWith('{') && block.endsWith('}')) || (block.startsWith('[') && block.endsWith(']'))) {
       if (!candidates.includes(block)) candidates.push(block);
     }
   }
@@ -181,10 +181,10 @@ export function extractJsonCandidates(text: string): string[] {
     if (ch === '"') { inString = !inString; continue; }
     if (inString) continue;
 
-    if (ch === '{') {
+    if (ch === '{' || ch === '[') {
       if (depth === 0) startIdx = i;
       depth++;
-    } else if (ch === '}') {
+    } else if (ch === '}' || ch === ']') {
       depth--;
       if (depth === 0 && startIdx !== -1) {
         const candidate = text.substring(startIdx, i + 1).trim();
@@ -224,7 +224,7 @@ function validateParsedStructure(
   parsed: any,
   hintType: string
 ): { documentType: string; fields: Record<string, string> } | null {
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!parsed || typeof parsed !== 'object') {
     return null;
   }
 
@@ -232,6 +232,17 @@ function validateParsedStructure(
     const err = new Error('Multiple documents were detected in one image. Please crop and scan one document at a time.');
     (err as any).isMultiDocError = true;
     throw err;
+  }
+
+  if (Array.isArray(parsed)) {
+    const flattened = flattenArrayFields(parsed);
+    if (Object.keys(flattened).length > 0) {
+      return {
+        documentType: hintType || 'Other Document',
+        fields: flattened,
+      };
+    }
+    return null;
   }
 
   const docType = String(parsed.documentType || parsed.type || parsed.docType || hintType || 'Other Document').trim();
@@ -259,7 +270,7 @@ function validateParsedStructure(
   if (!rawFieldsObj) return null;
 
   const flattened = flattenArrayFields(rawFieldsObj);
-  if (!flattened || typeof flattened !== 'object' || Array.isArray(flattened)) {
+  if (!flattened || typeof flattened !== 'object') {
     return null;
   }
 
@@ -295,34 +306,73 @@ function parsePlainTextResponse(
   const lines = content.split('\n');
   const rawFields: Record<string, string> = {};
   let detectedType = hintType || 'Other Document';
+  let currentHeader = '';
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
     // Ignore conversational English lines or markdown block delimiters
-    if (/^(here|note|rules|summary|analysis|json|output|response|below|above|instruction|sure|i\s+have|the\s+document\s+is|please|this\s+is)/i.test(trimmed)) {
+    if (/^(here|note|rules|summary|analysis|json|output|response|below|above|instruction|sure|i\s+have|the\s+document\s+is|please|this\s+is|```)/i.test(trimmed)) {
       continue;
     }
 
-    const docTypeMatch = trimmed.match(/^(?:document\s*type|type)\s*[:=-]\s*(.+)/i);
-    if (docTypeMatch?.[1]) {
-      detectedType = docTypeMatch[1].trim();
-      continue;
-    }
-
-    // Require strict "Key: Value" formatting with colon or equals
-    const kvMatch = trimmed.match(/^(?:[*\-\s]*)([A-Za-z0-9\s'\/().,-]+?)\s*[:=]\s*(.+)$/);
-    if (kvMatch) {
-      const k = kvMatch[1].trim();
-      const v = kvMatch[2].trim();
-      if (k.length > 0 && k.length <= 60 && v.length > 0) {
-        if (!/^(here|note|rules|summary|analysis|json|output|response|below|above|instruction)/i.test(k)) {
+    // Handle Markdown Table Rows: | Key | Value |
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      const cells = trimmed.split('|').map(c => c.trim()).filter(Boolean);
+      if (cells.length >= 2) {
+        const k = cells[0].replace(/^\*+|\*+$/g, '').trim();
+        const v = cells.slice(1).join(' - ').replace(/^\*+|\*+$/g, '').trim();
+        if (/^[-:]+$/.test(k) || /^(key|field|specification|spec|attribute|property|label|parameter)$/i.test(k)) {
+          continue;
+        }
+        if (k && v && !/^[-:]+$/.test(v)) {
           rawFields[k] = v;
+          continue;
+        }
+      }
+    }
+
+    const docTypeMatch = trimmed.match(/^(?:[*\-\s#]*)(?:document\s*type|type)\s*[:=-]\s*(.+)/i);
+    if (docTypeMatch?.[1]) {
+      const dt = docTypeMatch[1].replace(/^\*+|\*+$/g, '').trim();
+      if (dt) detectedType = dt;
+      currentHeader = '';
+      continue;
+    }
+
+    // Strip bullets, markdown headers (#, ##, ###), and numbered prefixes (1., 2), etc.)
+    const cleanLeading = trimmed.replace(/^\s*(?:[-*•#]+|\d+[.)]|\(\d+\))\s*/, '').trim();
+    const kvMatch = cleanLeading.match(/^(?:\*{1,2})?([A-Za-z0-9\s'\/().,-]+?)(?:\*{1,2})?\s*[:=-]\s*(.*)$/);
+
+    if (kvMatch) {
+      const k = kvMatch[1].replace(/^\*+|\*+$/g, '').trim();
+      let v = kvMatch[2].replace(/^\*+|\*+$/g, '').trim();
+      if (k.length > 0 && k.length <= 60) {
+        if (/^(here|note|rules|summary|analysis|json|output|response|below|above|instruction)/i.test(k)) {
+          continue;
+        }
+        if (v.length > 0 && !/^[*_\-\s:]+$/.test(v)) {
+          rawFields[k] = v;
+          currentHeader = '';
+        } else {
+          // Header with no value on the same line (e.g. **Logos:**)
+          currentHeader = k;
+        }
+      }
+    } else if (currentHeader && /^\s*[-*•]/.test(trimmed)) {
+      // List item belonging to previous header
+      const item = trimmed.replace(/^\s*[-*•]\s*/, '').replace(/^\*+|\*+$/g, '').trim();
+      if (item && item.length > 0 && !/^[*_\-\s:]+$/.test(item)) {
+        if (!rawFields[currentHeader]) {
+          rawFields[currentHeader] = item;
+        } else {
+          rawFields[currentHeader] += ', ' + item;
         }
       }
     }
   }
+
   return { documentType: detectedType, fields: rawFields };
 }
 
@@ -439,6 +489,7 @@ async function callNvidiaApiWithBackoff(
     logStage(`API call attempt ${attempt}/${maxRetries}`);
 
     try {
+      console.log(`[OCR_TRACE] STEP 4 API request started: endpoint=${NVIDIA_ENDPOINT}`);
       const response = await fetch(NVIDIA_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -448,12 +499,14 @@ async function callNvidiaApiWithBackoff(
         body: JSON.stringify(body),
       });
 
+      console.log(`[OCR_TRACE] STEP 5 API response received: status=${response.status}`);
       logStage(`HTTP ${response.status}`);
 
       if (response.ok) {
         const text = await response.text();
         const json = JSON.parse(text);
         const content = json.choices?.[0]?.message?.content?.trim() || '';
+        console.log(`[OCR_TRACE] STEP 6 raw model response received: ${content.substring(0, 300).replace(/\n/g, ' ')}...`);
         logStage('AI response received');
         return content;
       }
@@ -534,6 +587,7 @@ export async function extractDocumentDetails(
     logError('START', 'No image URI provided');
     throw new Error('No image URI provided for extraction');
   }
+  console.log(`[OCR_TRACE] STEP 1 image URI: ${finalImageUri}`);
   logStage('Image URI valid');
 
   // ── Stage 1: Adaptive preprocessing ─────────────────────────────────────
@@ -541,6 +595,7 @@ export async function extractDocumentDetails(
   // All OCR logging ([OCR] Original / Preprocessed / Preprocessing applied / Final selected)
   // is emitted inside prepareImageForOcr itself.
   const prep = await prepareImageForOcr(finalImageUri, 1600, 0.85);
+  console.log(`[OCR_TRACE] STEP 2 prepared image: ${prep.width}x${prep.height}, transforms=[${prep.appliedTransforms.join(', ')}]`);
   logStage(
     `Prep complete: ${prep.width}x${prep.height}` +
     `${prep.wasUpscaled ? ' [UPSCALED]' : ''}` +
@@ -550,6 +605,8 @@ export async function extractDocumentDetails(
 
   // ── Stage 2: Base64 ──────────────────────────────────────────────────────
   const base64Image = await uriToBase64(prep.uri);
+  const base64Prefix = base64Image.substring(0, 30);
+  console.log(`[OCR_TRACE] STEP 3 base64 length: ${base64Image.length}, prefix: ${base64Prefix}`);
   logStage(`Base64 ready (length=${base64Image.length.toLocaleString()})`);
 
   // ── Stage 2.5: Image Quality Analysis ────────────────────────────────────
@@ -675,8 +732,10 @@ function buildCorrectivePrompt(
     parseResult = parseAiResponse(aiContent, resolvedCategory);
     const hasJsonObject = extractJsonFromText(aiContent) !== null;
     if (parseResult && !hasJsonObject) usedPlaintextFallback = true;
+    console.log(`[OCR_TRACE] STEP 7 parsed JSON: ${JSON.stringify(parseResult)}, usedPlaintext=${usedPlaintextFallback}`);
   } catch (err: any) {
     logError('ATTEMPT_1', err?.message);
+    console.log(`[OCR_TRACE] STEP 7 parsed JSON: null, usedPlaintext=false`);
   }
 
   let finalType = isUnknown
@@ -686,6 +745,7 @@ function buildCorrectivePrompt(
   let validation = parseResult
     ? validateAndPostProcessFields(finalType, parseResult.fields)
     : null;
+  console.log(`[OCR_TRACE] STEP 8 validated fields: count=${validation?.validFieldCount || 0}, fields=${JSON.stringify(validation?.fields || {})}`);
 
   // ── Stage 6: Determine if Controlled Retry (Attempt 2) is needed ──────────
   const jsonFailed = !parseResult || Object.keys(parseResult.fields).length === 0;

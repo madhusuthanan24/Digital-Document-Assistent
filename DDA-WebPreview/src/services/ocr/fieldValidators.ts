@@ -269,34 +269,70 @@ export function normalizeDate(rawDate: string): string | null {
 // 5. Array-format JSON Field Flattener
 // ---------------------------------------------------------------------------
 export function flattenArrayFields(raw: Record<string, any> | any[]): Record<string, any> {
+  const result: Record<string, any> = {};
+  if (!raw || typeof raw !== 'object') return result;
+
   if (Array.isArray(raw)) {
-    const result: Record<string, any> = {};
+    const allPrimitives = raw.every(x => typeof x !== 'object' || x === null);
+    if (allPrimitives) {
+      const joined = raw.filter(x => x !== null && x !== undefined).map(x => String(x).trim()).filter(Boolean).join(', ');
+      return joined ? { value: joined } : {};
+    }
     for (const item of raw) {
       if (item && typeof item === 'object') {
         const key = item.key || item.field || item.label || item.name;
         const val = item.value || item.val || item.text || item.content;
-        if (key && val && typeof key === 'string') {
-          result[key] = val;
+        if (key && val !== undefined) {
+          result[String(key).trim()] = typeof val === 'object' ? JSON.stringify(val) : String(val).trim();
+        } else {
+          Object.assign(result, flattenArrayFields(item));
         }
       }
     }
     return result;
   }
-  return raw;
+
+  for (const [key, val] of Object.entries(raw)) {
+    if (val === null || val === undefined) continue;
+    if (Array.isArray(val)) {
+      const allPrimitives = val.every(x => typeof x !== 'object' || x === null);
+      if (allPrimitives) {
+        const joined = val.filter(x => x !== null && x !== undefined).map(x => String(x).trim()).filter(Boolean).join(', ');
+        if (joined) result[key] = joined;
+      } else {
+        const sub = flattenArrayFields(val);
+        for (const [subK, subV] of Object.entries(sub)) {
+          result[`${key}_${subK}`] = subV;
+        }
+      }
+    } else if (typeof val === 'object') {
+      const sub = flattenArrayFields(val);
+      for (const [subK, subV] of Object.entries(sub)) {
+        result[subK] = subV;
+      }
+    } else {
+      const str = String(val).trim();
+      if (str) result[key] = str;
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
 // 6. Field Sanitization & Placeholder Filter
 // ---------------------------------------------------------------------------
 export const PLACEHOLDER_REGEX =
-  /^(n\/a|na|none|null|undefined|not\s*(available|provided|found|specified|present|applicable|visible)|unclear|unknown|absent|missing|-+|_|\?+|\[.*?\]|\.\.\.|\s*)$/i;
+  /^(n\/a|na|none|null|undefined|not\s*(available|provided|found|specified|present|applicable|visible)|unclear|unknown|absent|missing|-+|_|\?+|\*+|\[.*?\]|\.\.\.|\s*)$/i;
 
 export function sanitizeFieldValue(val: any): string | null {
   if (val === null || val === undefined) return null;
   const str = String(val).trim();
   if (!str || PLACEHOLDER_REGEX.test(str)) return null;
-  if (str.length < 1) return null;
-  return str;
+  if (/^[*_\-\s:]+$/.test(str)) return null;
+  const cleaned = str.replace(/^\*+|\*+$/g, '').trim();
+  if (!cleaned || PLACEHOLDER_REGEX.test(cleaned)) return null;
+  if (cleaned.length < 1) return null;
+  return cleaned;
 }
 
 // ---------------------------------------------------------------------------
