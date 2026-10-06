@@ -233,49 +233,209 @@ const deleteDocument = async (req, res) => {
 };
 
 /**
+ * Helper to parse diverse document date formats:
+ * - DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+ * - YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD
+ * - 15 Oct 2026, October 15 2026, ISO strings
+ */
+function parseDocumentDate(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const trimmed = dateStr.trim();
+  if (!trimmed) return null;
+
+  // 1. DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+  const dmyMatch = trimmed.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (dmyMatch) {
+    const day = parseInt(dmyMatch[1], 10);
+    const month = parseInt(dmyMatch[2], 10) - 1;
+    const year = parseInt(dmyMatch[3], 10);
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) return d;
+    }
+  }
+
+  // 2. YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
+  const ymdMatch = trimmed.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (ymdMatch) {
+    const year = parseInt(ymdMatch[1], 10);
+    const month = parseInt(ymdMatch[2], 10) - 1;
+    const day = parseInt(ymdMatch[3], 10);
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) return d;
+    }
+  }
+
+  // 3. Native Date parse fallback
+  const parsed = new Date(trimmed);
+  if (!isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
+  return null;
+}
+
+function formatDisplayDate(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${day} ${monthNames[date.getMonth()]} ${date.getFullYear()}`;
+}
+
+function calculateDaysRemaining(targetDate, today = new Date()) {
+  const targetMidnight = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const diffMs = targetMidnight.getTime() - todayMidnight.getTime();
+  return Math.round(diffMs / (1000 * 60 * 60 * 24));
+}
+
+const IGNORED_DATE_KEYS = [
+  'dateofbirth', 'dob', 'birthdate', 'birth',
+  'issuedate', 'issue_date', 'issuedon', 'issued',
+  'registrationdate', 'registration_date',
+  'documentdate', 'testdate', 'purchasedate', 'yearofpassing'
+];
+
+/**
  * Get Expiry Reminders (documents with upcoming or expired dates)
  * GET /api/documents/reminders/expiry
  */
 const getExpiryReminders = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user?.userId || req.headers['x-user-id'];
 
+    if (!userId) {
+      return errorResponse(res, 'User ID is required', 400);
+    }
+
+    // 1. Fetch user's Personal Vault documents
     const documents = await prisma.document.findMany({
-      where: { userId, expiryDate: { not: null } },
-      orderBy: { expiryDate: 'asc' },
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
     });
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const reminders = documents
-      .map((doc) => {
-        const expDate = new Date(doc.expiryDate);
-        if (isNaN(expDate.getTime())) return null;
-        expDate.setHours(0, 0, 0, 0);
+    const reminders = [];
 
-        const diffMs = expDate.getTime() - today.getTime();
-        const daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    // 2. Extract reminder-worthy date fields from each document
+    for (const doc of documents) {
+      let parsedFields = {};
+      if (doc.fields) {
+        try {
+          parsedFields = typeof doc.fields === 'string' ? JSON.parse(doc.fields) : doc.fields;
+        } catch (e) {
+          parsedFields = {};
+        }
+      }
 
+      const candidateDates = [];
+
+      // A. Check explicit column
+      if (doc.expiryDate && typeof doc.expiryDate === 'string' && doc.expiryDate.trim()) {
+        candidateDates.push({ key: 'expiryDate', value: doc.expiryDate.trim(), type: 'Expiry' });
+      }
+
+      // B. Check dynamic fields
+      for (const [k, v] of Object.entries(parsedFields)) {
+        if (!v || typeof v !== 'string' || !v.trim()) continue;
+        const lk = k.toLowerCase().replace(/[_\s-]/g, '');
+
+        if (IGNORED_DATE_KEYS.some(ig => lk.includes(ig))) {
+          continue;
+        }
+
+        let type = null;
+        if (lk.includes('renewal')) type = 'Renewal';
+        else if (lk.includes('due')) type = 'Due Date';
+        else if (lk.includes('warranty')) type = 'Warranty Expiry';
+        else if (lk.includes('validuntil') || lk.includes('validupto') || lk.includes('validity')) type = 'Validity';
+        else if (lk.includes('expiry') || lk.includes('expire')) type = 'Expiry';
+
+        if (type) {
+          candidateDates.push({ key: k, value: v.trim(), type });
+        }
+      }
+
+      // Deduplicate dates for this document
+      const seenDates = new Set();
+
+      for (const cd of candidateDates) {
+        const parsedDate = parseDocumentDate(cd.value);
+        if (!parsedDate) continue;
+
+        const dateKey = `${cd.type}_${parsedDate.getFullYear()}-${parsedDate.getMonth()}-${parsedDate.getDate()}`;
+        if (seenDates.has(dateKey)) continue;
+        seenDates.add(dateKey);
+
+        const daysRemaining = calculateDaysRemaining(parsedDate, today);
         let status;
         if (daysRemaining < 0) status = 'EXPIRED';
         else if (daysRemaining <= 30) status = 'EXPIRING_SOON';
         else status = 'VALID';
 
-        return {
-          id: `rem_${doc.id}`,
+        reminders.push({
+          id: `rem_${doc.id}_${cd.type.toLowerCase().replace(/\s+/g, '_')}`,
           documentId: doc.id,
           documentName: doc.documentName,
           documentType: doc.documentType,
           documentNumber: doc.documentNumber,
-          expiryDate: doc.expiryDate,
+          reminderType: cd.type,
+          targetDate: formatDisplayDate(parsedDate),
+          targetDateIso: parsedDate.toISOString(),
+          expiryDate: cd.value,
           daysRemaining,
           status,
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.daysRemaining - b.daysRemaining);
+          notificationSchedule: [30, 14, 7, 3, 1, 0],
+        });
+      }
+    }
 
+    // 3. Merge any manual reminders from prisma.reminder
+    try {
+      const manualReminders = await prisma.reminder.findMany({
+        where: { userId },
+        orderBy: { reminderDate: 'asc' },
+      });
+
+      for (const mr of manualReminders) {
+        const parsedDate = new Date(mr.reminderDate);
+        if (isNaN(parsedDate.getTime())) continue;
+
+        const daysRemaining = calculateDaysRemaining(parsedDate, today);
+        let status;
+        if (daysRemaining < 0) status = 'EXPIRED';
+        else if (daysRemaining <= 30) status = 'EXPIRING_SOON';
+        else status = 'VALID';
+
+        reminders.push({
+          id: mr.id,
+          documentId: 'manual',
+          documentName: mr.title,
+          documentType: 'Other',
+          reminderType: 'Manual',
+          targetDate: formatDisplayDate(parsedDate),
+          targetDateIso: parsedDate.toISOString(),
+          expiryDate: parsedDate.toISOString().slice(0, 10),
+          daysRemaining,
+          status,
+          notificationSchedule: [30, 14, 7, 3, 1, 0],
+        });
+      }
+    } catch (mErr) {
+      console.warn('[DOC_REMINDERS] Manual reminders merge warning:', mErr?.message);
+    }
+
+    // 4. Sort: active / upcoming first (0 to N days), then expired
+    reminders.sort((a, b) => {
+      if (a.daysRemaining >= 0 && b.daysRemaining >= 0) return a.daysRemaining - b.daysRemaining;
+      if (a.daysRemaining >= 0 && b.daysRemaining < 0) return -1;
+      if (a.daysRemaining < 0 && b.daysRemaining >= 0) return 1;
+      return b.daysRemaining - a.daysRemaining;
+    });
+
+    console.log(`[DOC_REMINDERS] Returning ${reminders.length} reminders for user "${userId}"`);
     return successResponse(res, reminders, 'Expiry reminders retrieved successfully');
   } catch (error) {
     console.error('[DOC_REMINDERS] Error:', error);

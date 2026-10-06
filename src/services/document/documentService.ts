@@ -7,22 +7,10 @@
  */
 
 import { Platform } from 'react-native';
-import Constants from 'expo-constants';
 import { DocumentMetadata, ExpiryReminder } from '../../types/document';
+import { getBackendBaseUrl, verifyBackendHealth } from '../network/networkConfig';
 
-const getBackendBaseUrl = (): string => {
-  if (Platform.OS === 'web') {
-    return 'http://localhost:5000';
-  }
-  const hostUri = Constants.expoConfig?.hostUri || (Constants as any).manifest?.debuggerHost;
-  if (hostUri) {
-    const hostIp = hostUri.split(':')[0];
-    if (hostIp && hostIp !== 'localhost' && hostIp !== '127.0.0.1') {
-      return `http://${hostIp}:5000`;
-    }
-  }
-  return Platform.OS === 'android' ? 'http://10.1.1.88:5000' : 'http://localhost:5000';
-};
+export { getBackendBaseUrl, verifyBackendHealth };
 
 const API_BASE_URL = getBackendBaseUrl();
 
@@ -153,7 +141,8 @@ class DocumentService {
       }
     }
 
-    const uploadUrl = `${API_BASE_URL}/api/documents`;
+    const uploadUrl = `${getBackendBaseUrl()}/api/documents`;
+    console.log(`[DOCUMENT][NETWORK] REQUEST_URL=${uploadUrl} METHOD=POST`);
     console.log(`[POSTGRES_DOC] Submitting multipart upload to: ${uploadUrl}`);
 
     const res = await this.executeMultipartUpload(uploadUrl, formData, userId);
@@ -345,37 +334,128 @@ class DocumentService {
       console.warn(`[POSTGRES_DOC] Get reminders fallback: ${err?.message}`);
     }
 
+    // Fallback: Compute reminders directly from stored vault documents
     const docs = await this.getDocuments(userId);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const reminders: ExpiryReminder[] = [];
 
+    const IGNORED_KEYS = [
+      'dateofbirth', 'dob', 'birthdate', 'birth',
+      'issuedate', 'issue_date', 'issuedon', 'issued',
+      'registrationdate', 'registration_date',
+      'documentdate', 'testdate', 'purchasedate', 'yearofpassing'
+    ];
+
     docs.forEach(doc => {
-      if (doc.expiryDate) {
-        const expDate = new Date(doc.expiryDate);
-        if (!isNaN(expDate.getTime())) {
-          expDate.setHours(0, 0, 0, 0);
-          const diffTime = expDate.getTime() - today.getTime();
-          const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-          let status: 'EXPIRED' | 'EXPIRING_SOON' | 'VALID' = 'VALID';
-          if (daysRemaining < 0) status = 'EXPIRED';
-          else if (daysRemaining <= 30) status = 'EXPIRING_SOON';
-          reminders.push({
-            id: `rem_${doc.id}`,
-            documentId: doc.id,
-            documentName: doc.documentName,
-            documentType: doc.documentType,
-            documentNumber: doc.documentNumber,
-            expiryDate: doc.expiryDate,
-            daysRemaining,
-            status,
-          });
+      const candidateDates: { key: string; value: string; type: 'Expiry' | 'Renewal' | 'Due Date' | 'Warranty Expiry' | 'Validity' }[] = [];
+
+      // 1. Column expiryDate
+      if (doc.expiryDate && typeof doc.expiryDate === 'string' && doc.expiryDate.trim()) {
+        candidateDates.push({ key: 'expiryDate', value: doc.expiryDate.trim(), type: 'Expiry' });
+      }
+
+      // 2. Dynamic fields
+      if (doc.fields && typeof doc.fields === 'object') {
+        for (const [k, v] of Object.entries(doc.fields)) {
+          if (!v || typeof v !== 'string' || !v.trim()) continue;
+          const lk = k.toLowerCase().replace(/[_\s-]/g, '');
+          if (IGNORED_KEYS.some(ig => lk.includes(ig))) continue;
+
+          let type: 'Expiry' | 'Renewal' | 'Due Date' | 'Warranty Expiry' | 'Validity' | null = null;
+          if (lk.includes('renewal')) type = 'Renewal';
+          else if (lk.includes('due')) type = 'Due Date';
+          else if (lk.includes('warranty')) type = 'Warranty Expiry';
+          else if (lk.includes('validuntil') || lk.includes('validupto') || lk.includes('validity')) type = 'Validity';
+          else if (lk.includes('expiry') || lk.includes('expire')) type = 'Expiry';
+
+          if (type) {
+            candidateDates.push({ key: k, value: v.trim(), type });
+          }
         }
+      }
+
+      const seen = new Set<string>();
+
+      for (const cd of candidateDates) {
+        const parsedDate = parseDocumentDate(cd.value);
+        if (!parsedDate) continue;
+
+        const dateKey = `${cd.type}_${parsedDate.getFullYear()}-${parsedDate.getMonth()}-${parsedDate.getDate()}`;
+        if (seen.has(dateKey)) continue;
+        seen.add(dateKey);
+
+        const targetMidnight = new Date(parsedDate.getFullYear(), parsedDate.getMonth(), parsedDate.getDate());
+        const diffMs = targetMidnight.getTime() - today.getTime();
+        const daysRemaining = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+        let status: 'EXPIRED' | 'EXPIRING_SOON' | 'VALID' = 'VALID';
+        if (daysRemaining < 0) status = 'EXPIRED';
+        else if (daysRemaining <= 30) status = 'EXPIRING_SOON';
+
+        reminders.push({
+          id: `rem_${doc.id}_${cd.type.toLowerCase().replace(/\s+/g, '_')}`,
+          documentId: doc.id,
+          documentName: doc.documentName,
+          documentType: doc.documentType,
+          documentNumber: doc.documentNumber,
+          reminderType: cd.type,
+          targetDate: formatDisplayDate(parsedDate),
+          targetDateIso: parsedDate.toISOString(),
+          expiryDate: cd.value,
+          daysRemaining,
+          status,
+        });
       }
     });
 
-    return reminders.sort((a, b) => a.daysRemaining - b.daysRemaining);
+    return reminders.sort((a, b) => {
+      if (a.daysRemaining >= 0 && b.daysRemaining >= 0) return a.daysRemaining - b.daysRemaining;
+      if (a.daysRemaining >= 0 && b.daysRemaining < 0) return -1;
+      if (a.daysRemaining < 0 && b.daysRemaining >= 0) return 1;
+      return b.daysRemaining - a.daysRemaining;
+    });
   }
+}
+
+function parseDocumentDate(dateStr: string): Date | null {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const trimmed = dateStr.trim();
+  if (!trimmed) return null;
+
+  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+  const dmyMatch = trimmed.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (dmyMatch) {
+    const day = parseInt(dmyMatch[1], 10);
+    const month = parseInt(dmyMatch[2], 10) - 1;
+    const year = parseInt(dmyMatch[3], 10);
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) return d;
+    }
+  }
+
+  // YYYY-MM-DD or YYYY/MM/DD
+  const ymdMatch = trimmed.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (ymdMatch) {
+    const year = parseInt(ymdMatch[1], 10);
+    const month = parseInt(ymdMatch[2], 10) - 1;
+    const day = parseInt(ymdMatch[3], 10);
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) return d;
+    }
+  }
+
+  const parsed = new Date(trimmed);
+  if (!isNaN(parsed.getTime())) return parsed;
+  return null;
+}
+
+function formatDisplayDate(date: Date): string {
+  const day = String(date.getDate()).padStart(2, '0');
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${day} ${monthNames[date.getMonth()]} ${date.getFullYear()}`;
 }
 
 export const documentService = new DocumentService();

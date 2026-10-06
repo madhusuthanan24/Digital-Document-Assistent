@@ -1,25 +1,71 @@
 {
   "expo": {
-    "name": "DDA-WebPreview",
-    "slug": "DDA-WebPreview",
+    "name": "Digital Document Assistant",
+    "slug": "digital-document-assistant",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "automatic",
-    "ios": {},
-    "android": {},
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.digitaldocumentassistant",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-camera",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Digital Document Assistant to access your camera to scan documents.",
+          "recordAudioAndroid": false
+        }
+      ],
       "expo-document-picker",
-      "expo-image-picker",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Digital Document Assistant to access your photos to select documents."
+        }
+      ],
       "expo-font",
       "expo-web-browser",
       "expo-image",
       "expo-sharing",
-      "expo-splash-screen",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
       "expo-status-bar"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d5ba8eb2-ae58-4fa4-804e-30db94857b50"
+      }
+    }
   }
 }

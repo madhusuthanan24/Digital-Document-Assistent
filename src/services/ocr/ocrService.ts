@@ -483,10 +483,24 @@ async function callNvidiaApiWithBackoff(
 
   let attempt = 0;
   let delayMs = 1000;
-
   while (attempt < maxRetries) {
     attempt++;
     logStage(`API call attempt ${attempt}/${maxRetries}`);
+
+    let urlHost = '';
+    try {
+      urlHost = new URL(NVIDIA_ENDPOINT).host;
+    } catch {
+      urlHost = NVIDIA_ENDPOINT;
+    }
+    console.log(`[OCR500][REQUEST] URL host: ${urlHost}`);
+    console.log(`[OCR500][REQUEST] model: ${NVIDIA_MODEL}`);
+    console.log(`[OCR500][REQUEST] image MIME: image/jpeg`);
+    console.log(`[OCR500][REQUEST] image/base64 length: ${cleanB64.length}`);
+    console.log(`[OCR500][REQUEST] attempt: ${attempt}/${maxRetries}`);
+
+    const startTime = Date.now();
+    console.log(`[OCR500][TIMING] request start: ${new Date(startTime).toISOString()}`);
 
     try {
       console.log(`[OCR_TRACE] STEP 4 API request started: endpoint=${NVIDIA_ENDPOINT}`);
@@ -498,6 +512,11 @@ async function callNvidiaApiWithBackoff(
         },
         body: JSON.stringify(body),
       });
+
+      const endTime = Date.now();
+      const durationMs = endTime - startTime;
+      console.log(`[OCR500][TIMING] response received: ${new Date(endTime).toISOString()}`);
+      console.log(`[OCR500][TIMING] duration ms: ${durationMs}`);
 
       console.log(`[OCR_TRACE] STEP 5 API response received: status=${response.status}`);
       logStage(`HTTP ${response.status}`);
@@ -511,6 +530,13 @@ async function callNvidiaApiWithBackoff(
         return content;
       }
 
+      console.log(`[OCR500][RESPONSE_STATUS] ${response.status}`);
+      console.log(`[OCR500][RESPONSE_STATUS_TEXT] ${response.statusText}`);
+      const errBody = await response.text().catch(() => '');
+      console.log(`[OCR500][RESPONSE_BODY_BEGIN]`);
+      console.log(errBody);
+      console.log(`[OCR500][RESPONSE_BODY_END]`);
+
       if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
         console.warn(`[OCR][API] HTTP ${response.status} — retrying in ${delayMs}ms`);
         await new Promise<void>((r) => { setTimeout(() => r(), delayMs); });
@@ -518,7 +544,6 @@ async function callNvidiaApiWithBackoff(
         continue;
       }
 
-      const errBody = await response.text().catch(() => '');
       throw new Error(`[API_${response.status}] ${errBody.slice(0, 200)}`);
     } catch (err: any) {
       if (attempt >= maxRetries) throw err;

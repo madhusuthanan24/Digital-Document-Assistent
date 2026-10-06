@@ -18,6 +18,7 @@ import * as Sharing from 'expo-sharing';
 import { readAsStringAsync, writeAsStringAsync, EncodingType, cacheDirectory, documentDirectory, downloadAsync, StorageAccessFramework, copyAsync, getInfoAsync } from 'expo-file-system/legacy';
 import { theme } from '../../constants/theme';
 import { documentService } from '../../services/document/documentService';
+import { notificationService } from '../../services/notifications/notificationService';
 import { DocumentCategory, DocumentMetadata } from '../../types/document';
 import { DOCUMENT_TEMPLATES, categoryToTemplateKey } from '../../templates/documentTemplates';
 import { LoadingIndicator } from '../../components/common/LoadingIndicator';
@@ -430,6 +431,7 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
       };
 
       await documentService.updateDocument(user.uid, selectedDoc.id, updatePayload);
+      notificationService.cancelDocumentNotifications(selectedDoc.id);
 
       const updatedDoc: DocumentMetadata = {
         ...selectedDoc,
@@ -462,6 +464,7 @@ export const DocumentsScreen: React.FC<any> = ({ navigation }) => {
             if (!user?.uid) return;
             try {
               await documentService.deleteDocument(user.uid, doc.id);
+              notificationService.cancelDocumentNotifications(doc.id);
               Alert.alert('Deleted', 'Document deleted successfully.');
               handleCloseModal();
               fetchDocs();

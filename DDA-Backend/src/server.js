@@ -47,5 +47,6 @@ app.listen(PORT, () => {
   console.log(`=================================`);
   console.log(`DDA Backend running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`[ASSISTANT_PROVIDER] NVIDIA`);
   console.log(`=================================`);
 });

@@ -38,6 +38,9 @@ export interface ExpiryReminder {
   documentName: string;
   documentType: DocumentCategory;
   documentNumber?: string;
+  reminderType?: 'Expiry' | 'Renewal' | 'Due Date' | 'Warranty Expiry' | 'Validity' | 'Manual';
+  targetDate?: string;
+  targetDateIso?: string;
   expiryDate: string;
   daysRemaining: number;
   status: 'EXPIRED' | 'EXPIRING_SOON' | 'VALID';

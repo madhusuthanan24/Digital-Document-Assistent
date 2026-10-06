@@ -8,54 +8,42 @@ datasource db {
 }
 
 model User {
-  id         String     @id @default(cuid())
-  name       String
-  email      String     @unique
-  password   String
-  createdAt  DateTime   @default(now())
-
-  documents  Document[]
-  reminders  Reminder[]
+  id        String     @id @default(cuid())
+  name      String
+  email     String     @unique
+  password  String
+  createdAt DateTime   @default(now())
+  documents Document[]
+  reminders Reminder[]
 }
 
 model Document {
-  id            String   @id @default(cuid())
-  userId        String
-
-  documentType  String
-  documentName  String
-
-  documentNumber String?
-
-  name          String?
-  fatherName    String?
-  gender        String?
-  address       String?
-
-  dateOfBirth   String?
-  issueDate     String?
-  expiryDate    String?
-
-  fields        String?
-
-  imagePath          String?
-  croppedImagePath   String?
-  originalImagePath  String?
-  mimeType           String?
-
-  createdAt     DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                String   @id @default(cuid())
+  userId            String
+  documentType      String
+  documentName      String
+  documentNumber    String?
+  name              String?
+  fatherName        String?
+  gender            String?
+  address           String?
+  dateOfBirth       String?
+  issueDate         String?
+  expiryDate        String?
+  imagePath         String?
+  mimeType          String?
+  createdAt         DateTime @default(now())
+  croppedImagePath  String?
+  originalImagePath String?
+  fields            String?
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Reminder {
-  id          String   @id @default(cuid())
-  userId      String
-
-  title       String
+  id           String   @id @default(cuid())
+  userId       String
+  title        String
   reminderDate DateTime
-
-  createdAt DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

@@ -493,6 +493,22 @@ async function callNvidiaApiWithBackoff(
   while (attempt < maxRetries) {
     attempt++;
     logStage(`API call attempt ${attempt}/${maxRetries}`);
+
+    let urlHost = '';
+    try {
+      urlHost = new URL(NVIDIA_ENDPOINT).host;
+    } catch {
+      urlHost = NVIDIA_ENDPOINT;
+    }
+    console.log(`[OCR500][REQUEST] URL host: ${urlHost}`);
+    console.log(`[OCR500][REQUEST] model: ${NVIDIA_MODEL}`);
+    console.log(`[OCR500][REQUEST] image MIME: image/jpeg`);
+    console.log(`[OCR500][REQUEST] image/base64 length: ${cleanB64.length}`);
+    console.log(`[OCR500][REQUEST] attempt: ${attempt}/${maxRetries}`);
+
+    const startTime = Date.now();
+    console.log(`[OCR500][TIMING] request start: ${new Date(startTime).toISOString()}`);
+
     try {
       console.log(`[OCR_TRACE] STEP 4 API request started: endpoint=${NVIDIA_ENDPOINT}`);
       const response = await fetch(NVIDIA_ENDPOINT, {
@@ -500,8 +516,15 @@ async function callNvidiaApiWithBackoff(
         headers: { Authorization: `Bearer ${NVIDIA_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+
+      const endTime = Date.now();
+      const durationMs = endTime - startTime;
+      console.log(`[OCR500][TIMING] response received: ${new Date(endTime).toISOString()}`);
+      console.log(`[OCR500][TIMING] duration ms: ${durationMs}`);
+
       console.log(`[OCR_TRACE] STEP 5 API response received: status=${response.status}`);
       logStage(`HTTP ${response.status}`);
+
       if (response.ok) {
         const json = JSON.parse(await response.text());
         const content = json.choices?.[0]?.message?.content?.trim() || '';
@@ -509,13 +532,21 @@ async function callNvidiaApiWithBackoff(
         logStage('AI response received');
         return content;
       }
+
+      console.log(`[OCR500][RESPONSE_STATUS] ${response.status}`);
+      console.log(`[OCR500][RESPONSE_STATUS_TEXT] ${response.statusText}`);
+      const responseText = await response.text().catch(() => '');
+      console.log(`[OCR500][RESPONSE_BODY_BEGIN]`);
+      console.log(responseText);
+      console.log(`[OCR500][RESPONSE_BODY_END]`);
+
       if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
         console.warn(`[OCR][API] HTTP ${response.status} — retrying in ${delayMs}ms`);
         await new Promise<void>((r) => { setTimeout(() => r(), delayMs); });
         delayMs *= 2;
         continue;
       }
-      throw new Error(`[API_${response.status}] ${(await response.text().catch(() => '')).slice(0, 200)}`);
+      throw new Error(`[API_${response.status}] ${responseText.slice(0, 200)}`);
     } catch (err: any) {
       if (attempt >= maxRetries) throw err;
       console.warn(`[OCR][API] Exception attempt ${attempt}: ${err?.message}`);

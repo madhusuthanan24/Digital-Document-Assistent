@@ -74,5 +74,8 @@ yarn-error.log
 !.yarn/sdks
 !.yarn/versions
 
-# Gemini API key
-src/config/gemini.ts
+# Environment files
+.env
+*.env
+!.env.example
+DDA-Backend/.env
