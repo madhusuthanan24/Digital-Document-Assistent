@@ -131,7 +131,7 @@ export async function sendChatMessage(params: SendChatParams): Promise<{
         };
       }
       return {
-        reply: data?.message || 'AI Assistant is temporarily unavailable. Please try again.',
+        reply: data?.message || `AI Assistant server error (HTTP ${res.status}). Please try again.`,
       };
     }
   } catch (err: any) {
@@ -140,12 +140,12 @@ export async function sendChatMessage(params: SendChatParams): Promise<{
     if (err?.name === 'AbortError') {
       console.warn(`[ASSISTANT][CLIENT] REQUEST_ABORTED request_id=${requestId} elapsed_ms=${elapsed}`);
       return {
-        reply: 'AI Assistant request timed out. Please check your connection and try again.',
+        reply: 'AI Assistant request timed out (45s). Please check your connection and try again.',
       };
     }
     console.warn(`[ASSISTANT][CLIENT] FETCH_ERROR request_id=${requestId} elapsed_ms=${elapsed} error=${err?.message}`);
     return {
-      reply: 'AI Assistant is temporarily unavailable. Please try again.',
+      reply: `Cannot connect to DDA Backend server at ${requestUrl}. Please ensure the backend server is running and your device is on the same network (${urlHost}).`,
     };
   }
 }

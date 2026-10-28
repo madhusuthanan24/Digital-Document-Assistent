@@ -9,8 +9,8 @@ import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 
 // Verified Windows Host LAN IP addresses
-export const LAN_WIFI_IP = '10.232.154.198';
-export const LAN_ETHERNET_IP = '192.168.78.116';
+export const LAN_WIFI_IP = '10.42.190.198';
+export const LAN_ETHERNET_IP = '172.16.11.223';
 export const BACKEND_PORT = 5000;
 
 export interface NetworkConfigInfo {
@@ -107,6 +107,18 @@ export function getBackendBaseUrl(): string {
     console.log(`[BACKEND_NETWORK] TARGET_HOST=${config.targetHost}`);
     console.log(`[BACKEND_NETWORK] TARGET_PORT=${config.targetPort}`);
     console.log(`[BACKEND_NETWORK] CONNECTION_MODE=${config.connectionMode}`);
+
+    const isLocal =
+      config.baseUrl.includes('localhost') ||
+      config.baseUrl.includes('127.0.0.1') ||
+      config.baseUrl.includes('10.') ||
+      config.baseUrl.includes('192.168.') ||
+      config.baseUrl.includes('172.');
+    if (typeof __DEV__ !== 'undefined' && !__DEV__ && isLocal) {
+      console.warn(
+        `[BACKEND_NETWORK][CRITICAL_CONFIG] Production standalone build is currently pointing to a local IP (${config.baseUrl}). For full independence across networks, configure EXPO_PUBLIC_API_URL with your public HTTPS backend.`
+      );
+    }
   }
 
   return config.baseUrl;

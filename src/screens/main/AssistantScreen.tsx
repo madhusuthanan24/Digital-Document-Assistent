@@ -86,7 +86,7 @@ export const AssistantScreen: React.FC<AssistantScreenProps> = ({ navigation, ro
     setMessages(newHistory);
     setIsLoading(true);
 
-    const conversationHistory = newHistory.map(m => ({
+    const conversationHistory = messages.map(m => ({
       role: m.role,
       content: m.content,
     }));

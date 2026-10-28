@@ -2,6 +2,7 @@ const prisma = require('../db');
 const path = require('path');
 const fs = require('fs');
 const { successResponse, errorResponse } = require('../utils/responseHandler');
+const { uploadDocumentImage, deleteDocumentImage } = require('../services/storageService');
 
 /**
  * Create Document
@@ -44,8 +45,17 @@ const createDocument = async (req, res) => {
       });
     }
 
-    const imagePath = req.file ? `/uploads/${req.file.filename}` : (bodyImagePath || null);
-    const mimeType = req.file ? req.file.mimetype : (req.body.mimeType || 'image/jpeg');
+    let imagePath = bodyImagePath || null;
+    let mimeType = req.body.mimeType || 'image/jpeg';
+
+    if (req.file) {
+      mimeType = req.file.mimetype;
+      const uploaded = await uploadDocumentImage(req.file, {
+        folder: 'dda_documents',
+        id: `doc_${userId}_${Date.now()}`,
+      });
+      imagePath = uploaded.url;
+    }
 
     let fieldsStr = null;
     if (typeof bodyFields === 'string') {
@@ -164,14 +174,20 @@ const updateDocument = async (req, res) => {
       fieldsStr = JSON.stringify(bodyFields);
     }
 
-    const newImagePath = req.file ? `/uploads/${req.file.filename}` : existing.imagePath;
-    const newMimeType = req.file ? req.file.mimetype : existing.mimeType;
+    let newImagePath = existing.imagePath;
+    let newMimeType = existing.mimeType;
 
-    // Delete old file if replaced
-    if (req.file && existing.imagePath) {
-      const oldFilePath = path.join(__dirname, '../../', existing.imagePath);
-      if (fs.existsSync(oldFilePath)) {
-        fs.unlinkSync(oldFilePath);
+    if (req.file) {
+      newMimeType = req.file.mimetype;
+      const uploaded = await uploadDocumentImage(req.file, {
+        folder: 'dda_documents',
+        id: `doc_${userId}_${Date.now()}`,
+      });
+      newImagePath = uploaded.url;
+
+      // Delete old file if replaced
+      if (existing.imagePath) {
+        await deleteDocumentImage(existing.imagePath);
       }
     }
 
@@ -215,12 +231,9 @@ const deleteDocument = async (req, res) => {
       return errorResponse(res, 'Document not found', 404);
     }
 
-    // Remove file from disk if exists
+    // Remove file from storage if exists
     if (document.imagePath) {
-      const fullPath = path.join(__dirname, '../../', document.imagePath);
-      if (fs.existsSync(fullPath)) {
-        fs.unlinkSync(fullPath);
-      }
+      await deleteDocumentImage(document.imagePath);
     }
 
     await prisma.document.delete({ where: { id } });
@@ -466,6 +479,11 @@ const getDocumentImage = async (req, res) => {
 
     if (!document || !targetPath) {
       return errorResponse(res, 'Document or image not found', 404);
+    }
+
+    // If targetPath is a persistent cloud URL (HTTPS), redirect directly
+    if (targetPath.startsWith('http://') || targetPath.startsWith('https://')) {
+      return res.redirect(targetPath);
     }
 
     const cleanPath = targetPath.startsWith('/') ? targetPath.slice(1) : targetPath;

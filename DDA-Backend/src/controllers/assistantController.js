@@ -60,6 +60,7 @@ const NVIDIA_CHAT_ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completio
 
 /**
  * Formats conversation messages for NVIDIA Chat Completions API.
+ * Deduplicates trailing user message if already present in history.
  */
 function prepareChatMessages(systemPrompt, history, currentMessage) {
   const messages = [
@@ -68,8 +69,13 @@ function prepareChatMessages(systemPrompt, history, currentMessage) {
 
   if (Array.isArray(history)) {
     const recent = history.slice(-6);
-    for (const msg of recent) {
+    for (let i = 0; i < recent.length; i++) {
+      const msg = recent[i];
       if (msg.role && msg.content && String(msg.content).trim()) {
+        // If last history message matches current message from user, avoid duplicate
+        if (i === recent.length - 1 && msg.role === 'user' && String(msg.content).trim() === currentMessage.trim()) {
+          continue;
+        }
         messages.push({
           role: msg.role === 'assistant' ? 'assistant' : 'user',
           content: String(msg.content).trim(),
@@ -88,36 +94,62 @@ function prepareChatMessages(systemPrompt, history, currentMessage) {
 
 /**
  * Calls NVIDIA NIM Chat Completions API with dedicated ASSISTANT_NVIDIA_API_KEY.
+ * Retries once on transient HTTP 5xx or connection aborts.
  */
 async function callNvidiaChatApi(apiKey, model, messages, options = {}) {
-  const timeoutMs = options.timeoutMs || 40000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const maxAttempts = options.maxAttempts || 2;
+  const timeoutMs = options.timeoutMs || 20000;
+  let lastError = null;
 
-  try {
-    const payload = {
-      model,
-      messages,
-      temperature: 0.2,
-      max_tokens: 800,
-    };
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    const res = await fetch(NVIDIA_CHAT_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+    try {
+      const payload = {
+        model,
+        messages,
+        temperature: 0.2,
+        max_tokens: 800,
+      };
 
-    clearTimeout(timer);
-    return res;
-  } catch (err) {
-    clearTimeout(timer);
-    throw err;
+      if (attempt > 1) {
+        console.log(`[ASSISTANT][NVIDIA_CHAT] Retry attempt ${attempt}/${maxAttempts}...`);
+      }
+
+      const res = await fetch(NVIDIA_CHAT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      // If status is 5xx and we have remaining attempts, retry after a short delay
+      if (!res.ok && res.status >= 500 && attempt < maxAttempts) {
+        console.warn(`[ASSISTANT][NVIDIA_CHAT] Transient HTTP ${res.status} from NVIDIA (attempt ${attempt}/${maxAttempts}). Retrying in 1.5s...`);
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      lastError = err;
+      if (attempt < maxAttempts) {
+        console.warn(`[ASSISTANT][NVIDIA_CHAT] Attempt ${attempt}/${maxAttempts} failed (${err.name}: ${err.message}). Retrying in 1.5s...`);
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+      throw err;
+    }
   }
+
+  throw lastError || new Error('NVIDIA API call failed after retries');
 }
 
 /**
@@ -148,9 +180,14 @@ const processChatMessage = async (req, res) => {
     let docObj = null;
 
     if (documentId) {
-      docObj = await prisma.document.findUnique({
-        where: { id: documentId },
-      });
+      try {
+        docObj = await prisma.document.findUnique({
+          where: { id: documentId },
+        });
+      } catch (dbErr) {
+        console.error(`[ASSISTANT][DB_ERROR] Failed to query document ${documentId}:`, dbErr.message);
+        return errorResponse(res, 'Database unavailable while retrieving document context. Please verify database connection.', 503);
+      }
 
       if (!docObj) {
         return errorResponse(res, 'Document not found', 404);
@@ -196,7 +233,7 @@ const processChatMessage = async (req, res) => {
 
     if (!apiKey) {
       console.warn('[ASSISTANT] ASSISTANT_NVIDIA_API_KEY is not configured in backend environment.');
-      return errorResponse(res, 'AI Assistant is not configured. Please set ASSISTANT_NVIDIA_API_KEY in backend.', 500);
+      return errorResponse(res, 'AI Assistant is not configured. Please set ASSISTANT_NVIDIA_API_KEY in backend environment.', 500);
     }
 
     const model = (process.env.ASSISTANT_NVIDIA_MODEL || '').trim() || DEFAULT_NVIDIA_MODEL;
@@ -212,7 +249,7 @@ const processChatMessage = async (req, res) => {
 
     let nvidiaRes;
     try {
-      nvidiaRes = await callNvidiaChatApi(apiKey, model, messages, { timeoutMs: 40000 });
+      nvidiaRes = await callNvidiaChatApi(apiKey, model, messages, { timeoutMs: 20000, maxAttempts: 2 });
     } catch (apiErr) {
       const errElapsed = Date.now() - nvidiaReqStart;
       console.error(`[ASSISTANT][NVIDIA_CHAT] API Call Exception (+${errElapsed}ms):`, apiErr.message);
@@ -222,9 +259,9 @@ const processChatMessage = async (req, res) => {
       const backendStatus = apiErr.name === 'AbortError' ? 504 : 502;
       console.log(`[ASSISTANT_NVIDIA] BACKEND_RESPONSE_STATUS=${backendStatus}`);
       if (apiErr.name === 'AbortError') {
-        return errorResponse(res, 'AI Assistant request timed out. Please try again.', 504);
+        return errorResponse(res, 'AI Assistant request timed out while contacting NVIDIA AI. Please try again.', 504);
       }
-      return errorResponse(res, 'AI Assistant network error. Please try again.', 502);
+      return errorResponse(res, 'AI Assistant network error connecting to NVIDIA AI provider. Please try again.', 502);
     }
 
     const responseReceivedTime = Date.now();
@@ -246,13 +283,13 @@ const processChatMessage = async (req, res) => {
 
       let userErrorMsg = 'AI Assistant is temporarily busy. Please try again.';
       if (errStatus === 401 || errStatus === 403) {
-        userErrorMsg = 'AI Assistant authentication failed. Please verify your NVIDIA API key.';
+        userErrorMsg = 'AI Assistant authentication failed. Please verify your NVIDIA API key configuration.';
       } else if (errStatus === 404) {
         userErrorMsg = 'Configured NVIDIA model was not found. Please verify available models.';
       } else if (errStatus === 429) {
         userErrorMsg = 'NVIDIA AI rate limit reached. Please wait a moment and try again.';
       } else if (errStatus >= 500) {
-        userErrorMsg = 'NVIDIA AI service is temporarily unavailable. Please try again shortly.';
+        userErrorMsg = 'NVIDIA AI service is temporarily experiencing high load. Please try again shortly.';
       }
 
       const totalDuration = Date.now() - reqReceivedTime;
@@ -310,10 +347,10 @@ const processChatMessage = async (req, res) => {
   } catch (error) {
     const errTime = Date.now();
     const elapsed = errTime - reqReceivedTime;
-    console.error(`[ASSISTANT][NVIDIA_CHAT] ERROR (+${elapsed}ms):`, error.message);
+    console.error(`[ASSISTANT][NVIDIA_CHAT] ERROR category=CONTROLLER_EXCEPTION (+${elapsed}ms):`, error.message);
     console.log(`[ASSISTANT][NVIDIA_CHAT] TOTAL_TIME_MS=${elapsed}`);
     console.log('[ASSISTANT_NVIDIA] BACKEND_RESPONSE_STATUS=500');
-    return errorResponse(res, 'AI Assistant is temporarily unavailable. Please try again.', 500);
+    return errorResponse(res, 'AI Assistant internal error: ' + error.message, 500);
   }
 };
 

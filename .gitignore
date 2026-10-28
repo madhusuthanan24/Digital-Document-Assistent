@@ -79,3 +79,7 @@ yarn-error.log
 *.env
 !.env.example
 DDA-Backend/.env
+
+# Local upload files
+DDA-Backend/uploads/*
+!DDA-Backend/uploads/.gitkeep
