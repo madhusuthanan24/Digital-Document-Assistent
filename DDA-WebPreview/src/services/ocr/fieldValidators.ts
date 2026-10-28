@@ -361,6 +361,134 @@ export function getExpectedFieldCount(documentType: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// 7.5 Canonical Field Key Normalizer
+// ---------------------------------------------------------------------------
+export function canonicalizeFieldKey(rawKey: string, documentType: string = ''): string {
+  if (!rawKey) return '';
+  const clean = rawKey.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  const docLower = documentType.toLowerCase();
+
+  // Aadhaar
+  if (clean.includes('aadhaar') || clean.includes('aadhar') || clean === 'uid' || clean === 'uidno' || clean === 'uidnumber' || (docLower.includes('aadhaar') && (clean === 'number' || clean === 'no'))) {
+    return 'aadhaarNumber';
+  }
+  // PAN
+  if (clean === 'pan' || clean === 'pannumber' || clean === 'panno' || clean === 'permanentaccountnumber' || (docLower.includes('pan') && (clean === 'number' || clean === 'no'))) {
+    return 'panNumber';
+  }
+  // Voter / EPIC
+  if (clean.includes('epic') || clean === 'voterid' || clean === 'voteridnumber' || clean === 'voteridno' || (docLower.includes('voter') && (clean === 'number' || clean === 'no'))) {
+    return 'epicNumber';
+  }
+  // Passport
+  if (clean.includes('passport') && (clean.includes('no') || clean.includes('num') || clean.length < 15)) {
+    return 'passportNumber';
+  }
+  // Driving Licence
+  if ((clean.includes('licence') || clean.includes('license') || clean === 'dl' || clean === 'dlno') && (clean.includes('no') || clean.includes('num') || clean.length < 15)) {
+    return 'licenceNumber';
+  }
+  // Vehicle RC
+  if ((clean.includes('registration') || clean === 'regno' || clean === 'rcno' || clean === 'rcnumber') && !clean.includes('date')) {
+    return 'registrationNumber';
+  }
+  // Policy Number
+  if (clean.includes('policy') && (clean.includes('no') || clean.includes('num'))) {
+    return 'policyNumber';
+  }
+  // Account Number
+  if (clean.includes('account') && (clean.includes('no') || clean.includes('num'))) {
+    return 'accountNumber';
+  }
+  // DOB / Birth Date
+  if (clean === 'dob' || clean === 'dateofbirth' || clean === 'birthdate' || clean === 'dobdate' || clean === 'born' || clean === 'yearofbirth') {
+    return 'dateOfBirth';
+  }
+  // Name / Full Name
+  if (clean === 'fullname' || clean === 'nameofholder' || clean === 'cardholdername' || clean === 'nameofperson' || (clean === 'name' && !clean.includes('father') && !clean.includes('mother') && !clean.includes('husband') && !clean.includes('bank') && !clean.includes('insurer'))) {
+    return 'name';
+  }
+  // Father's Name
+  if (clean.includes('father') || clean === 'careof' || clean === 'co') {
+    return 'fatherName';
+  }
+  // Husband's Name
+  if (clean.includes('husband')) {
+    return 'husbandName';
+  }
+  // Guardian's Name
+  if (clean.includes('guardian')) {
+    return 'guardianName';
+  }
+  // Gender / Sex
+  if (clean === 'sex' || clean === 'gender') {
+    return 'gender';
+  }
+  // Address
+  if (clean.includes('address') || clean === 'residentialaddress') {
+    return 'address';
+  }
+  // Issue Date / Valid From / Reg Date
+  if (clean === 'dateofissue' || clean === 'issuedate' || clean === 'doi' || clean === 'validfrom' || clean === 'registrationdate') {
+    return 'issueDate';
+  }
+  // Expiry Date / Valid To / Valid Upto
+  if (clean === 'dateofexpiry' || clean === 'expirydate' || clean === 'validto' || clean === 'validupto' || clean === 'validtill' || clean === 'doe') {
+    return 'expiryDate';
+  }
+  // IFSC Code
+  if (clean === 'ifsc' || clean === 'ifsccode') {
+    return 'ifscCode';
+  }
+  // Bank Name
+  if (clean === 'bankname' || clean === 'bank') {
+    return 'bankName';
+  }
+  // Roll Number
+  if (clean === 'rollnumber' || clean === 'rollno') {
+    return 'rollNumber';
+  }
+  // Institution
+  if (clean.includes('institution') || clean.includes('school') || clean.includes('college') || clean.includes('university')) {
+    return 'institution';
+  }
+  // Course / Degree
+  if (clean.includes('course') || clean.includes('degree') || clean.includes('qualification')) {
+    return 'courseName';
+  }
+  // Vehicle Class
+  if (clean.includes('vehicleclass') || clean === 'vclass' || clean === 'cov') {
+    return 'vehicleClass';
+  }
+  // Chassis Number
+  if (clean.includes('chassis')) {
+    return 'chassisNumber';
+  }
+  // Engine Number
+  if (clean.includes('engine')) {
+    return 'engineNumber';
+  }
+  // Fuel Type
+  if (clean.includes('fuel')) {
+    return 'fuelType';
+  }
+  // Sum Insured
+  if (clean.includes('suminsured') || clean.includes('coverage')) {
+    return 'sumInsured';
+  }
+  // Insurer Name
+  if (clean.includes('insurer')) {
+    return 'insurerName';
+  }
+  // Policy Holder Name
+  if (clean.includes('holder')) {
+    return 'holderName';
+  }
+
+  return rawKey;
+}
+
+// ---------------------------------------------------------------------------
 // 8. Primary Extraction Validation & Confidence Scoring Engine
 // ---------------------------------------------------------------------------
 export function validateAndPostProcessFields(
@@ -378,10 +506,25 @@ export function validateAndPostProcessFields(
 
   // ── Step 1: Validate & Clean Each Extracted Field ─────────────────────────
   for (const [key, rawVal] of Object.entries(rawFields)) {
-    const val = sanitizeFieldValue(rawVal);
-    if (!val) continue;
+    let val = sanitizeFieldValue(rawVal);
+    let effectiveKey = canonicalizeFieldKey(key, documentType);
 
-    const lowerKey = key.toLowerCase();
+    // If value is empty, but key itself looks like an ID number (e.g. "1234 5678 9012": "")
+    if (!val) {
+      const cleanAadhaar = validateAndCleanAadhaar(key);
+      const cleanPan = validateAndCleanPan(key);
+      if (cleanAadhaar) {
+        val = cleanAadhaar;
+        effectiveKey = 'aadhaarNumber';
+      } else if (cleanPan) {
+        val = cleanPan;
+        effectiveKey = 'panNumber';
+      } else {
+        continue;
+      }
+    }
+
+    const lowerKey = effectiveKey.toLowerCase();
     let finalValue = val;
     let confidence: 'HIGH' | 'MEDIUM' | 'LOW' = 'MEDIUM';
     let needsReview = false;
@@ -512,9 +655,15 @@ export function validateAndPostProcessFields(
       confidence = 'HIGH';
     }
 
-    processedFields[key] = finalValue;
-    validatedFields[key] = { value: finalValue, confidence, needsReview, issue };
-    fieldConfidence[key] = confidence.toLowerCase() as 'high' | 'medium' | 'low';
+    processedFields[effectiveKey] = finalValue;
+    validatedFields[effectiveKey] = { value: finalValue, confidence, needsReview, issue };
+    fieldConfidence[effectiveKey] = confidence.toLowerCase() as 'high' | 'medium' | 'low';
+
+    if (effectiveKey !== key) {
+      processedFields[key] = finalValue;
+      validatedFields[key] = { value: finalValue, confidence, needsReview, issue };
+      fieldConfidence[key] = confidence.toLowerCase() as 'high' | 'medium' | 'low';
+    }
   }
 
   // ── Step 2: Cross-Field Date Validation (Issue Date <= Expiry Date) ──────
@@ -545,10 +694,14 @@ export function validateAndPostProcessFields(
   for (const [docCategory, reqFields] of Object.entries(REQUIRED_FIELDS_BY_TYPE)) {
     if (docLower.includes(docCategory.toLowerCase()) || docCategory.toLowerCase().includes(docLower)) {
       for (const reqKey of reqFields) {
-        const found = Object.keys(processedFields).some(k => k.toLowerCase() === reqKey.toLowerCase());
+        const found = Object.keys(processedFields).some(k => {
+          const cleanK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const cleanReq = reqKey.toLowerCase().replace(/[^a-z0-9]/g, '');
+          return cleanK === cleanReq || canonicalizeFieldKey(k, docCategory) === reqKey;
+        });
         if (!found) {
           missingRequiredFields.push(reqKey);
-          validationIssues.push(`Required field "${reqKey}" was not detected on this ${docCategory}.`);
+          validationIssues.push(`Field "${reqKey}" was not detected on this ${docCategory}.`);
         }
       }
       break;
@@ -607,6 +760,16 @@ export function validateAndPostProcessFields(
     fieldConfidence.sex = fieldConfidence.gender;
   }
 
+  if (processedFields.dateOfBirth && !processedFields.dob) {
+    processedFields.dob = processedFields.dateOfBirth;
+    validatedFields.dob = validatedFields.dateOfBirth;
+    fieldConfidence.dob = fieldConfidence.dateOfBirth;
+  } else if (processedFields.dob && !processedFields.dateOfBirth) {
+    processedFields.dateOfBirth = processedFields.dob;
+    validatedFields.dateOfBirth = validatedFields.dob;
+    fieldConfidence.dateOfBirth = fieldConfidence.dob;
+  }
+
   // ── Step 5: Overall Confidence Calculation ──────────────────────────────
   const validFieldCount = Object.keys(processedFields).length;
   const highCount = Object.values(fieldConfidence).filter(c => c === 'high').length;
@@ -615,13 +778,11 @@ export function validateAndPostProcessFields(
   let overallConfidence: 'high' | 'medium' | 'low' | 'none' = 'none';
   if (validFieldCount === 0) {
     overallConfidence = 'none';
-  } else if (lowCount > 0 || missingRequiredFields.length > 0) {
-    overallConfidence = 'low';
-  } else if (highCount >= 1 && validFieldCount >= 2) {
+  } else if (validFieldCount >= 2 && missingRequiredFields.length === 0 && lowCount === 0) {
     overallConfidence = 'high';
-  } else if (validFieldCount >= 2) {
+  } else if (validFieldCount >= 1) {
     overallConfidence = 'medium';
-  } else if (validFieldCount === 1) {
+  } else {
     overallConfidence = 'low';
   }
 

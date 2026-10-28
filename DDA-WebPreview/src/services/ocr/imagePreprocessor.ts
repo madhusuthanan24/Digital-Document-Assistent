@@ -51,14 +51,14 @@ export interface ImagePrepResult {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const TARGET_UPSCALE_EDGE  = 1200;
-const TARGET_STANDARD_EDGE = 1600;
-const TARGET_HIRES_EDGE    = 1920;
+const TARGET_UPSCALE_EDGE  = 1080;
+const TARGET_STANDARD_EDGE = 1280;
+const TARGET_HIRES_EDGE    = 1600;
 const MIN_EDGE_FOR_GOOD_OCR = 800;
 
-const QUALITY_HIGH     = 0.95;
-const QUALITY_STANDARD = 0.85;
-const QUALITY_REDUCED  = 0.80;
+const QUALITY_HIGH     = 0.85;
+const QUALITY_STANDARD = 0.75;
+const QUALITY_REDUCED  = 0.70;
 const BPP_LOW_DETAIL_THRESHOLD = 0.035;
 
 // ---------------------------------------------------------------------------
@@ -204,7 +204,13 @@ async function detectImageOrientation(uri: string): Promise<OrientationInfo> {
     }
 
     if (base64Chunk) {
-      const binaryStr = typeof atob === 'function' ? atob(base64Chunk) : Buffer.from(base64Chunk, 'base64').toString('binary');
+      const g = globalThis as any;
+      const binaryStr = typeof g.atob === 'function'
+        ? g.atob(base64Chunk)
+        : typeof g.Buffer !== 'undefined'
+        ? g.Buffer.from(base64Chunk, 'base64').toString('binary')
+        : '';
+      if (!binaryStr) return { orientation: 1, degrees: 0, label: '0° (upright)', detected: false };
       const bytes = new Uint8Array(binaryStr.length);
       for (let i = 0; i < binaryStr.length; i++) {
         bytes[i] = binaryStr.charCodeAt(i);
@@ -322,40 +328,15 @@ export async function prepareImageForOcr(
     };
   }
 
-  // ── Step 6: Multi-version comparison ────────────────────────────────────
-  const processedBpp = computeBpp(processedB64Len, processedResult.width * processedResult.height);
-  let finalUri = processedResult.uri;
-  let finalW   = processedResult.width;
-  let finalH   = processedResult.height;
-  let selectedVersion = 'preprocessed';
-
-  if (chosenQuality < QUALITY_HIGH && processedBpp < BPP_LOW_DETAIL_THRESHOLD * 2) {
-    try {
-      console.log('[OCR] Info density low — generating high-fidelity comparison version');
-      const hfResult = await resizeImage(uri, targetW, QUALITY_HIGH);
-      const hfB64Len = await measureBase64Length(hfResult.uri);
-      const hfBpp = computeBpp(hfB64Len, hfResult.width * hfResult.height);
-
-      if (hfBpp > processedBpp * 1.1) {
-        finalUri = hfResult.uri;
-        finalW   = hfResult.width;
-        finalH   = hfResult.height;
-        transforms.push('hf-comparison=selected');
-        selectedVersion = 'high-fidelity comparison';
-        console.log(`[OCR] High-fidelity version selected (bpp ${hfBpp.toFixed(4)} vs ${processedBpp.toFixed(4)})`);
-      } else {
-        transforms.push('hf-comparison=rejected');
-        console.log(`[OCR] Standard version retained (bpp comparable: ${processedBpp.toFixed(4)} vs ${hfBpp.toFixed(4)})`);
-      }
-    } catch {
-      console.log('[OCR] High-fidelity comparison failed — retaining standard version');
-    }
-  }
+  // ── Step 6: Final Selection ─────────────────────────────────────────────
+  const finalUri = processedResult.uri;
+  const finalW   = processedResult.width;
+  const finalH   = processedResult.height;
 
   const transformSummary = transforms.join(', ');
   console.log(`[OCR PREPROCESS] Final dimensions: ${finalW}x${finalH}`);
   console.log(`[OCR] Preprocessing applied: ${transformSummary}`);
-  console.log(`[OCR] Final image selected: ${selectedVersion}`);
+  console.log(`[OCR] Final image selected: preprocessed`);
 
   return {
     uri: finalUri,
