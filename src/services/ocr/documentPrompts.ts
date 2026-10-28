@@ -418,3 +418,43 @@ export function needsClassification(categoryHint?: string): boolean {
   const lower = categoryHint.trim().toLowerCase();
   return lower === 'other' || lower === 'other document' || lower === '' || lower === 'unknown';
 }
+
+/**
+ * Constructs a high-performance single-pass extraction prompt.
+ * Instructs the Vision LLM to detect the document type and extract all printed fields
+ * in a single request, completely eliminating redundant classification and retry roundtrips.
+ */
+export function getUnifiedExtractionPrompt(userCategoryHint?: string): string {
+  const normHint = userCategoryHint ? (normalizeDetectedType(userCategoryHint) || userCategoryHint) : '';
+  const hintInstruction = normHint && normHint !== 'Other' && normHint !== 'Unknown'
+    ? `The user indicated this document is likely: "${normHint}". Inspect the image to confirm or determine the exact document type, and extract all relevant fields.`
+    : `Visually inspect headers, emblems, logos, and layout to identify the exact document type and extract all printed fields.`;
+
+  return `${SYSTEM_PROMPT_HEADER}
+
+${hintInstruction}
+
+TASK:
+1. Identify the exact documentType (e.g. "Aadhaar Card", "PAN Card", "Passport", "Driving Licence", "Voter ID", "Vehicle RC", "Insurance Policy", "Educational Certificate", "Bank Document", "Medical Document", "Electronic Product", or "Other Document").
+2. Extract all clearly legible printed fields into key-value pairs inside the "fields" object.
+3. Special recognition rules:
+   - Aadhaar Card: extract "aadhaarNumber" (12 digits, format XXXX XXXX XXXX), "name", "fatherName" (if printed/C/O), "dateOfBirth" (YYYY-MM-DD), "gender", "address". Note: 12-digit number is aadhaarNumber even if no label is printed next to it.
+   - PAN Card: extract "panNumber" (10-char alphanumeric: 5 letters, 4 digits, 1 letter), "name", "fatherName", "dateOfBirth" (YYYY-MM-DD).
+   - Passport: extract "passportNumber", "name", "nationality", "dateOfBirth", "issueDate", "expiryDate", "sex".
+   - Driving Licence: extract "licenceNumber", "name", "dateOfBirth", "issueDate", "expiryDate", "address", "vehicleClasses".
+   - Voter ID: extract "epicNumber", "name", "fatherName" / "husbandName", "dateOfBirth", "gender", "address".
+   - Vehicle RC: extract "registrationNumber", "ownerName", "vehicleClass", "fuelType", "chassisNumber", "engineNumber", "issueDate", "expiryDate".
+   - Insurance Policy: extract "policyNumber", "holderName", "insurerName", "issueDate", "expiryDate", "sumInsured".
+   - Educational Certificate: extract "name", "rollNumber", "institution", "courseName", "issueDate", "percentage".
+   - Bank Document: extract "bankName", "accountHolderName", "accountNumber", "ifscCode", "branchName".
+   - Medical Document: extract "patientName", "doctorName", "hospitalName", "documentDate", "diagnosis", "medications".
+   - Other Document: extract specific printed key-value pairs using concise camelCase keys.
+4. Output strictly valid raw JSON:
+{
+  "documentType": "<Identified Type>",
+  "fields": {
+    "<key>": "<value>"
+  }
+}`;
+}
+

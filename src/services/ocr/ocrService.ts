@@ -28,6 +28,7 @@ import {
   CLASSIFY_ONLY_PROMPT,
   normalizeDetectedType,
   DOCUMENT_TYPE_PROMPTS,
+  getUnifiedExtractionPrompt,
 } from './documentPrompts';
 import {
   validateAndPostProcessFields,
@@ -462,9 +463,12 @@ function scoreFieldConfidence(
 async function callNvidiaApiWithBackoff(
   base64Image: string,
   prompt: string,
-  maxRetries = 3,
-  temperature?: number
+  maxRetries = 2,
+  temperature?: number,
+  timeoutMs = 40000,
+  requestId = 'req'
 ): Promise<string> {
+  const cleanB64 = base64Image.trim().replace(/^data:image\/[a-z]+;base64,/i, '');
   const body = {
     model: NVIDIA_MODEL,
     messages: [
@@ -472,7 +476,7 @@ async function callNvidiaApiWithBackoff(
         role: 'user',
         content: [
           { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${cleanB64}` } },
         ],
       },
     ],
@@ -485,25 +489,13 @@ async function callNvidiaApiWithBackoff(
   let delayMs = 1000;
   while (attempt < maxRetries) {
     attempt++;
-    logStage(`API call attempt ${attempt}/${maxRetries}`);
-
-    let urlHost = '';
-    try {
-      urlHost = new URL(NVIDIA_ENDPOINT).host;
-    } catch {
-      urlHost = NVIDIA_ENDPOINT;
-    }
-    console.log(`[OCR500][REQUEST] URL host: ${urlHost}`);
-    console.log(`[OCR500][REQUEST] model: ${NVIDIA_MODEL}`);
-    console.log(`[OCR500][REQUEST] image MIME: image/jpeg`);
-    console.log(`[OCR500][REQUEST] image/base64 length: ${cleanB64.length}`);
-    console.log(`[OCR500][REQUEST] attempt: ${attempt}/${maxRetries}`);
+    logStage(`[${requestId}] API call attempt ${attempt}/${maxRetries}`);
 
     const startTime = Date.now();
-    console.log(`[OCR500][TIMING] request start: ${new Date(startTime).toISOString()}`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      console.log(`[OCR_TRACE] STEP 4 API request started: endpoint=${NVIDIA_ENDPOINT}`);
       const response = await fetch(NVIDIA_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -511,49 +503,46 @@ async function callNvidiaApiWithBackoff(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
 
-      const endTime = Date.now();
-      const durationMs = endTime - startTime;
-      console.log(`[OCR500][TIMING] response received: ${new Date(endTime).toISOString()}`);
-      console.log(`[OCR500][TIMING] duration ms: ${durationMs}`);
-
-      console.log(`[OCR_TRACE] STEP 5 API response received: status=${response.status}`);
-      logStage(`HTTP ${response.status}`);
+      const durationMs = Date.now() - startTime;
+      console.log(`[OCR_TIMING][${requestId}] api_duration_ms=${durationMs} http_status=${response.status} attempt=${attempt}`);
+      logStage(`[${requestId}] HTTP ${response.status} in ${durationMs}ms`);
 
       if (response.ok) {
         const text = await response.text();
         const json = JSON.parse(text);
         const content = json.choices?.[0]?.message?.content?.trim() || '';
-        console.log(`[OCR_TRACE] STEP 6 raw model response received: ${content.substring(0, 300).replace(/\n/g, ' ')}...`);
-        logStage('AI response received');
+        logStage(`[${requestId}] AI response received`);
         return content;
       }
 
-      console.log(`[OCR500][RESPONSE_STATUS] ${response.status}`);
-      console.log(`[OCR500][RESPONSE_STATUS_TEXT] ${response.statusText}`);
       const errBody = await response.text().catch(() => '');
-      console.log(`[OCR500][RESPONSE_BODY_BEGIN]`);
-      console.log(errBody);
-      console.log(`[OCR500][RESPONSE_BODY_END]`);
+      console.warn(`[OCR][${requestId}] HTTP ${response.status}: ${errBody.slice(0, 150)}`);
 
       if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
-        console.warn(`[OCR][API] HTTP ${response.status} — retrying in ${delayMs}ms`);
+        console.warn(`[OCR][${requestId}] HTTP ${response.status} — retrying in ${delayMs}ms`);
         await new Promise<void>((r) => { setTimeout(() => r(), delayMs); });
         delayMs *= 2;
         continue;
       }
 
-      throw new Error(`[API_${response.status}] ${errBody.slice(0, 200)}`);
+      throw new Error(`[API_${response.status}] ${errBody.slice(0, 150)}`);
     } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error('NVIDIA Vision AI request timed out. Please check your internet connection and try again.');
+      }
       if (attempt >= maxRetries) throw err;
-      console.warn(`[OCR][API] Exception on attempt ${attempt}: ${err?.message}`);
+      console.warn(`[OCR][${requestId}] Exception on attempt ${attempt}: ${err?.message}`);
       await new Promise<void>((r) => { setTimeout(() => r(), delayMs); });
       delayMs *= 2;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  throw new Error('[API_FAIL] NVIDIA Vision API unreachable after all retries.');
+  throw new Error('NVIDIA Vision AI service is temporarily unreachable after retries.');
 }
 
 // ---------------------------------------------------------------------------
@@ -602,103 +591,10 @@ async function classifyDocument(
 // ---------------------------------------------------------------------------
 // Main Exported Function
 // ---------------------------------------------------------------------------
-export async function extractDocumentDetails(
-  finalImageUri: string,
-  documentTypeHint: string = ''
-): Promise<OCRResult> {
-  logStage('=== Extraction pipeline start ===');
-
-  if (!finalImageUri) {
-    logError('START', 'No image URI provided');
-    throw new Error('No image URI provided for extraction');
-  }
-  console.log(`[OCR_TRACE] STEP 1 image URI: ${finalImageUri}`);
-  logStage('Image URI valid');
-
-  // ── Stage 1: Adaptive preprocessing ─────────────────────────────────────
-  // prepareImageForOcr v3 handles: smart resize, adaptive quality, multi-version comparison.
-  // All OCR logging ([OCR] Original / Preprocessed / Preprocessing applied / Final selected)
-  // is emitted inside prepareImageForOcr itself.
-  const prep = await prepareImageForOcr(finalImageUri, 1600, 0.85);
-  console.log(`[OCR_TRACE] STEP 2 prepared image: ${prep.width}x${prep.height}, transforms=[${prep.appliedTransforms.join(', ')}]`);
-  logStage(
-    `Prep complete: ${prep.width}x${prep.height}` +
-    `${prep.wasUpscaled ? ' [UPSCALED]' : ''}` +
-    ` q=${prep.qualityUsed}` +
-    ` transforms=[${prep.appliedTransforms.join(', ')}]`
-  );
-
-  // ── Stage 2: Base64 ──────────────────────────────────────────────────────
-  const base64Image = await uriToBase64(prep.uri);
-  const base64Prefix = base64Image.substring(0, 30);
-  console.log(`[OCR_TRACE] STEP 3 base64 length: ${base64Image.length}, prefix: ${base64Prefix}`);
-  logStage(`Base64 ready (length=${base64Image.length.toLocaleString()})`);
-
-  // ── Stage 2.5: Image Quality Analysis ────────────────────────────────────
-  // Runs synchronously on already-computed values — no extra API call.
-  const imageQuality = analyzeImageQuality(
-    prep.width,
-    prep.height,
-    base64Image.length,
-    prep.wasUpscaled
-  );
-
-  if (!imageQuality.usable) {
-    // Image is genuinely unusable — throw before spending API quota
-    const userMsg = getQualityUserMessage(imageQuality) ||
-      'Image quality is too low. Please capture the document again with better lighting and focus.';
-    logError('QUALITY', `Blocked: score=${imageQuality.score} issues=${imageQuality.issues.join('; ')}`);
-    const err = new Error(userMsg);
-    (err as any).isQualityBlock = true;
-    (err as any).qualityResult = imageQuality;
-    throw err;
-  }
-
-  if (imageQuality.quality === 'MEDIUM') {
-    logStage(`Image quality is MEDIUM (score=${imageQuality.score}) — proceeding with caution`);
-  } else {
-    logStage(`Image quality: ${imageQuality.quality} (score=${imageQuality.score})`);
-  }
-
-  // ── Stage 3: Document Type Detection (Pass A) ────────────────────────────
-  // UI selection is a HINT, not absolute truth.
-  // We run Document Type Detection to identify the true document type dynamically.
-  const classification = await classifyDocument(base64Image, documentTypeHint);
-  const rawDetectedType = classification.detectedType;
-
-  const canonical = normalizeDetectedType(rawDetectedType);
-  const isUnknown =
-    !rawDetectedType ||
-    rawDetectedType.toLowerCase().includes('unknown') ||
-    rawDetectedType.toLowerCase().includes('blank') ||
-    rawDetectedType.toLowerCase().includes('solid') ||
-    rawDetectedType.toLowerCase().includes('noise') ||
-    rawDetectedType === 'Other Document' ||
-    (!canonical && rawDetectedType.toLowerCase() !== 'other');
-
-  let resolvedCategory = rawDetectedType;
-  if (isUnknown) {
-    resolvedCategory = 'Unknown Document';
-    logStage(`[OCR] Document type: "Unknown Document" (could not identify reliably as a known document)`);
-  } else if (canonical) {
-    resolvedCategory = canonical;
-    logStage(`[OCR] Document type detected: "${rawDetectedType}" (mapped to "${canonical}", UI hint was: "${documentTypeHint || 'none'}")`);
-  } else {
-    logStage(`[OCR] Document type detected: "${rawDetectedType}" (UI hint was: "${documentTypeHint || 'none'}")`);
-  }
-
-  // ── Stage 4: Document-Specific Extraction Prompt (Pass B) ────────────────
-  const prompt = isUnknown
-    ? DOCUMENT_TYPE_PROMPTS.Other
-    : getPromptForCategory(resolvedCategory);
-  logStage(`Extraction prompt resolved for: "${resolvedCategory}"`);
-
 // ---------------------------------------------------------------------------
-// Helper: Corrective Prompt Builder for Attempt 2
+// Helper: Corrective Prompt Builder for Fallback
 // ---------------------------------------------------------------------------
-// Helper: Corrective Prompt Builder for Attempt 2
-// ---------------------------------------------------------------------------
-function buildCorrectivePrompt(
+export function buildCorrectivePrompt(
   basePrompt: string,
   reasons: {
     jsonFailed: boolean;
@@ -717,133 +613,158 @@ function buildCorrectivePrompt(
 
   if (reasons.typeUnclear) {
     directives.push(
-      'CRITICAL: Previous attempt could not reliably identify the document type. Visually inspect the header, emblem, logo, watermark, and title. Identify the exact document category and extract only clearly visible fields.'
+      'CRITICAL: Visually inspect headers, emblems, logos, and layout to identify the exact document category and extract only clearly visible fields.'
     );
   }
 
   if (reasons.missingRequired.length > 0) {
     directives.push(
-      `MISSING FIELDS RE-EXAMINATION: The following required fields were missing in Attempt 1: [${reasons.missingRequired.join(
+      `MISSING FIELDS RE-EXAMINATION: Check image for fields [${reasons.missingRequired.join(
         ', '
-      )}]. Visually inspect top, middle, and bottom of the image character-by-character. Locate and extract these exact printed fields without guessing.`
-    );
-  }
-
-  if (reasons.validationIssues.length > 0) {
-    directives.push(
-      `VALIDATION ISSUES RE-EXAMINATION: The following fields contained format or logic issues: [${reasons.validationIssues
-        .slice(0, 3)
-        .join('; ')}]. Re-examine these specific fields character-by-character from the image. Read exact printed characters. Do not invent missing information.`
+      )}]. Locate and extract these exact printed fields without guessing.`
     );
   }
 
   if (directives.length === 0) {
     directives.push(
-      'Previous extraction was incomplete. Inspect the image character-by-character again. Do not guess. Extract only clearly visible fields.'
+      'Extract only clearly visible printed fields into strictly valid JSON. Do not guess.'
     );
   }
 
-  return `CORRECTIVE INSTRUCTIONS FOR ATTEMPT 2:\n${directives.join('\n\n')}\n\n${basePrompt}`;
+  return `CORRECTIVE INSTRUCTIONS:\n${directives.join('\n\n')}\n\n${basePrompt}`;
 }
 
-  // ── Stage 5: Attempt 1 — Normal Extraction ───────────────────────────────
-  logStage('Attempt 1: Running normal document extraction');
-  let aiContent = '';
-  let parseResult: { documentType: string; fields: Record<string, any> } | null = null;
-  let usedPlaintextFallback = false;
+export async function extractDocumentDetails(
+  finalImageUri: string,
+  documentTypeHint: string = '',
+  onProgress?: (stage: string) => void
+): Promise<OCRResult> {
+  const totalStartTime = Date.now();
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  logStage(`=== Extraction pipeline start [${requestId}] ===`);
 
-  try {
-    aiContent = await callNvidiaApiWithBackoff(base64Image, prompt, 2);
-    parseResult = parseAiResponse(aiContent, resolvedCategory);
-    const hasJsonObject = extractJsonFromText(aiContent) !== null;
-    if (parseResult && !hasJsonObject) usedPlaintextFallback = true;
-    console.log(`[OCR_TRACE] STEP 7 parsed JSON: ${JSON.stringify(parseResult)}, usedPlaintext=${usedPlaintextFallback}`);
-  } catch (err: any) {
-    logError('ATTEMPT_1', err?.message);
-    console.log(`[OCR_TRACE] STEP 7 parsed JSON: null, usedPlaintext=false`);
+  if (!finalImageUri) throw new Error('No image URI provided for extraction');
+  console.log(`[OCR_TRACE] STEP 1 image URI: ${finalImageUri}`);
+
+  // ── Stage 1: Preprocessing & Base64 Encoding ────────────────────────────
+  onProgress?.('Optimizing document image...');
+  const prepStart = Date.now();
+  const prep = await prepareImageForOcr(finalImageUri, 1280, 0.75);
+  const prepDuration = Date.now() - prepStart;
+
+  const b64Start = Date.now();
+  const rawBase64 = await uriToBase64(prep.uri);
+  const base64Image = rawBase64.trim().replace(/^data:image\/[a-z]+;base64,/i, '');
+  const b64Duration = Date.now() - b64Start;
+
+  const payloadKb = Math.round(base64Image.length * 0.75 / 1024);
+  console.log(`[OCR_TIMING][${requestId}] prep_ms=${prepDuration} b64_ms=${b64Duration} payload_kb=${payloadKb} dim=${prep.width}x${prep.height}`);
+
+  // ── Stage 1.5: Image Quality Analysis ───────────────────────────────────
+  const imageQuality = analyzeImageQuality(
+    prep.width,
+    prep.height,
+    base64Image.length,
+    prep.wasUpscaled
+  );
+
+  if (!imageQuality.usable) {
+    const userMsg = getQualityUserMessage(imageQuality) ||
+      'Image quality is too low. Please capture the document again with better lighting and focus.';
+    logError('QUALITY', `Blocked: score=${imageQuality.score} issues=${imageQuality.issues.join('; ')}`);
+    const err = new Error(userMsg);
+    (err as any).isQualityBlock = true;
+    (err as any).qualityResult = imageQuality;
+    throw err;
   }
 
-  let finalType = isUnknown
-    ? 'Unknown Document'
-    : (parseResult?.documentType || rawDetectedType || resolvedCategory || 'Other Document');
+  logStage(`[${requestId}] Image quality: ${imageQuality.quality} (score=${imageQuality.score})`);
 
-  let validation = parseResult
-    ? validateAndPostProcessFields(finalType, parseResult.fields)
-    : null;
-  console.log(`[OCR_TRACE] STEP 8 validated fields: count=${validation?.validFieldCount || 0}, fields=${JSON.stringify(validation?.fields || {})}`);
+  // ── Stage 2: Single-Pass Unified Vision Extraction ───────────────────────
+  onProgress?.('Scanning text with NVIDIA Vision AI...');
+  const prompt = getUnifiedExtractionPrompt(documentTypeHint);
+  logStage(`[${requestId}] Prompt resolved for Single-Pass Extraction (Hint: "${documentTypeHint || 'none'}")`);
 
-  // ── Stage 6: Determine if Controlled Retry (Attempt 2) is needed ──────────
-  const jsonFailed = !parseResult || Object.keys(parseResult.fields).length === 0;
-  const typeUnclear = isUnknown;
-  const missingImportant = (validation?.missingRequiredFields.length || 0) > 0;
-  const suspiciousOutput = (validation?.validationIssues.length || 0) > 0;
-  const lowConfidence = !validation || validation.overallConfidence === 'low' || validation.overallConfidence === 'none';
+  let aiContent = '';
+  let parseResult: { documentType: string; fields: Record<string, any> } | null = null;
+  let usedPlaintext = false;
 
-  const shouldRetry = jsonFailed || typeUnclear || missingImportant || suspiciousOutput || lowConfidence;
+  try {
+    const rawResponse = await callNvidiaApiWithBackoff(
+      base64Image,
+      prompt,
+      2,
+      NVIDIA_CONFIG.temperature,
+      40000,
+      requestId
+    );
+    aiContent = rawResponse;
 
-  if (!shouldRetry && validation && validation.validFieldCount >= 2) {
-    logStage('Attempt 1 succeeded with high quality — skipping retry');
-  } else {
-    // ── Stage 7: Attempt 2 — Stronger Corrective Extraction (Max 2 Attempts) ─
-    const retryReason = jsonFailed
-      ? 'JSON parsing failed'
-      : typeUnclear
-      ? 'Document type unclear'
-      : missingImportant
-      ? `Missing required fields (${validation?.missingRequiredFields.join(', ')})`
-      : suspiciousOutput
-      ? `Suspicious output (${validation?.validationIssues.slice(0, 1).join(', ')})`
-      : 'Low extraction confidence';
+    const parseStart = Date.now();
+    parseResult = parseAiResponse(rawResponse, documentTypeHint);
+    const parseDuration = Date.now() - parseStart;
+    console.log(`[OCR_TIMING][${requestId}] parse_ms=${parseDuration} initial_fields=${Object.keys(parseResult?.fields || {}).length}`);
 
-    logStage(`Attempt 2: Triggering corrective retry (Reason: ${retryReason})`);
+    if (parseResult && !extractJsonFromText(aiContent)) {
+      usedPlaintext = true;
+    }
+  } catch (err: any) {
+    logError('SINGLE_PASS', err?.message);
+    throw err;
+  }
 
-    const correctivePrompt = buildCorrectivePrompt(prompt, {
-      jsonFailed,
-      typeUnclear,
-      missingRequired: validation?.missingRequiredFields || [],
-      validationIssues: validation?.validationIssues || [],
-    });
-
+  // ── Stage 2.5: Fast JSON Recovery (Only if 0 fields parsed) ──────────────
+  if (!parseResult || Object.keys(parseResult.fields).length === 0) {
+    logStage(`[${requestId}] Initial attempt parsed 0 fields — executing fast fallback re-call`);
+    onProgress?.('Re-examining document fields...');
+    const fallbackPrompt = `CRITICAL: Previous attempt produced no fields. Output ONLY a valid JSON object matching this schema without markdown or text:
+{"documentType": "${documentTypeHint || 'Document'}", "fields": {"<key>": "<value>"}}`;
     try {
-      const highResPrep = await prepareHighResRetryImage(finalImageUri);
-      const highResB64 = await uriToBase64(highResPrep.uri);
-      const retryContent = await callNvidiaApiWithBackoff(highResB64, correctivePrompt, 2, 0);
-      const retryParsed = parseAiResponse(retryContent, resolvedCategory);
-
-      if (retryParsed && Object.keys(retryParsed.fields).length > 0) {
-        const retryType = isUnknown && retryParsed.documentType && retryParsed.documentType !== 'Unknown Document'
-          ? retryParsed.documentType
-          : finalType;
-        const retryValidation = validateAndPostProcessFields(retryType, retryParsed.fields);
-
-        // Evaluate whether Attempt 2 is better than Attempt 1
-        const attempt1Score = validation ? validation.validFieldCount * 10 - validation.validationIssues.length * 5 : -100;
-        const attempt2Score = retryValidation.validFieldCount * 10 - retryValidation.validationIssues.length * 5;
-
-        if (attempt2Score >= attempt1Score || !validation) {
-          logStage(`Attempt 2 adopted: ${retryValidation.validFieldCount} valid fields (confidence: ${retryValidation.overallConfidence})`);
-          parseResult = retryParsed;
-          validation = retryValidation;
-          aiContent = retryContent;
-          finalType = retryType;
-          usedPlaintextFallback = false;
-        } else {
-          logStage('Attempt 2 did not improve over Attempt 1 — keeping Attempt 1 result');
-        }
+      const fbResponse = await callNvidiaApiWithBackoff(
+        base64Image,
+        fallbackPrompt,
+        1,
+        0,
+        30000,
+        `${requestId}_fb`
+      );
+      const fbResult = parseAiResponse(fbResponse, documentTypeHint);
+      if (fbResult && Object.keys(fbResult.fields).length > 0) {
+        parseResult = fbResult;
+        aiContent = fbResponse;
+        usedPlaintext = false;
       }
-    } catch (err: any) {
-      logError('ATTEMPT_2', err?.message);
+    } catch (fbErr: any) {
+      logError('FALLBACK', fbErr?.message);
     }
   }
 
-  // ── Stage 8: Safe Extraction Failure Check ────────────────────────────────
+  // ── Stage 3: Field Validation, Normalization & Confidence ────────────────
+  onProgress?.('Analyzing and structuring fields...');
+  const validationStart = Date.now();
+
+  const finalType = normalizeDetectedType(parseResult?.documentType || '') ||
+    parseResult?.documentType ||
+    documentTypeHint ||
+    'Other Document';
+
+  const validation = parseResult
+    ? validateAndPostProcessFields(finalType, parseResult.fields)
+    : null;
+
+  const validationDuration = Date.now() - validationStart;
+  const totalDuration = Date.now() - totalStartTime;
+
+  console.log(`[OCR_TIMING][${requestId}] validation_ms=${validationDuration} valid_fields=${validation?.validFieldCount || 0}`);
+  console.log(`[OCR_TIMING][${requestId}] total_duration_ms=${totalDuration} type="${finalType}"`);
+
+  // ── Stage 4: Safe Extraction Failure Check ────────────────────────────────
   if (!validation || validation.validFieldCount === 0) {
-    logError('RESULT', 'Both extraction attempts failed to produce valid fields');
-    throw new Error('Some details could not be extracted. Please verify the fields manually or retake the document image.');
+    logError('RESULT', 'No valid text fields could be extracted from image');
+    throw new Error('Some details could not be extracted. Please verify lighting and crop, or enter details manually.');
   }
 
-  // Downgrade any 'HIGH' confidence to 'MEDIUM' if plaintext fallback was used
-  if (usedPlaintextFallback) {
+  if (usedPlaintext) {
     for (const [k, v] of Object.entries(validation.validatedFields)) {
       if (v.confidence === 'HIGH') {
         v.confidence = 'MEDIUM';
@@ -852,7 +773,7 @@ function buildCorrectivePrompt(
     }
   }
 
-  logStage(`=== Extraction Complete: type="${finalType}" validFields=${validation.validFieldCount} confidence=${validation.overallConfidence} ===`);
+  logStage(`=== Extraction Complete [${requestId}]: type="${finalType}" validFields=${validation.validFieldCount} confidence=${validation.overallConfidence} totalDuration=${totalDuration}ms ===`);
 
   return {
     documentType: finalType,

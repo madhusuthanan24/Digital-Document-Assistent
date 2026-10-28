@@ -45,6 +45,55 @@ const DOCUMENT_TYPES: { type: DocumentCategory; label: string; icon: string }[] 
   { type: 'Other', label: 'Other Document', icon: '📁' },
 ];
 
+const normalizeKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const FIELD_ALIAS_MAP: Record<string, string[]> = {
+  dateofbirth: ['dob', 'birthdate', 'dateofbirth', 'yearofbirth', 'yob'],
+  dob: ['dob', 'birthdate', 'dateofbirth', 'yearofbirth', 'yob'],
+  issuedate: ['dateofissue', 'issuedate', 'doi', 'issue_date'],
+  expirydate: ['dateofexpiry', 'validupto', 'expirydate', 'validity', 'expiry_date'],
+  voteridnumber: ['epicnumber', 'epicno', 'voternumber', 'voterid', 'voteridno', 'epic'],
+  aadhaarnumber: ['uid', 'aadhaarno', 'aadhaar', 'adharnumber', 'uidai', 'aadhaarnum', 'aadhaarcardnumber'],
+  pannumber: ['panno', 'pan', 'pancardnumber', 'incometaxpanno'],
+  licencenumber: ['dlnumber', 'dlno', 'drivinglicence', 'drivinglicencenumber', 'drivinglicenseno', 'licenceno'],
+  registrationnumber: ['rcnumber', 'regno', 'registrationno', 'vehiclenumber', 'regnno', 'chassisno'],
+  fathername: ['guardianname', 'fathername', 'careof', 'fatherorguardian', 'fathersname'],
+  gender: ['sex', 'gender'],
+  address: ['permanentaddress', 'residentialaddress', 'currentaddress', 'address'],
+};
+
+const getFieldData = (
+  fieldKey: string,
+  fields: Record<string, string>,
+  valFields: Record<string, { value: string; confidence: 'HIGH' | 'MEDIUM' | 'LOW'; needsReview: boolean; issue?: string }>
+) => {
+  const targetNorm = normalizeKey(fieldKey);
+  const allowedAliases = FIELD_ALIAS_MAP[targetNorm] || [targetNorm];
+
+  if (fields[fieldKey] !== undefined) {
+    return { value: fields[fieldKey], valInfo: valFields[fieldKey] };
+  }
+
+  for (const [k, v] of Object.entries(fields)) {
+    const kNorm = normalizeKey(k);
+    if (kNorm === targetNorm || allowedAliases.includes(kNorm)) {
+      return { value: v, valInfo: valFields[k] || valFields[fieldKey] };
+    }
+  }
+
+  return { value: '', valInfo: undefined };
+};
+
+const isFieldInTemplate = (key: string, templateFields: Array<{ key: string }>): boolean => {
+  const kNorm = normalizeKey(key);
+  return templateFields.some(f => {
+    const fNorm = normalizeKey(f.key);
+    if (fNorm === kNorm) return true;
+    const aliases = FIELD_ALIAS_MAP[fNorm] || [fNorm];
+    return aliases.includes(kNorm);
+  });
+};
+
 export const ScanScreen: React.FC<Props> = ({ navigation }) => {
   const { user } = useAuth();
 
@@ -67,6 +116,7 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
 
   // OCR state
   const [isExtracting, setIsExtracting] = useState<boolean>(false);
+  const [extractionStage, setExtractionStage] = useState<string>('🔍 Extracting document fields...');
   const [ocrConfidence, setOcrConfidence] = useState<'high' | 'medium' | 'low' | 'none' | null>(null);
   const [ocrFailed, setOcrFailed] = useState<boolean>(false);
   const [ocrFailMessage, setOcrFailMessage] = useState<string>('');
@@ -157,6 +207,7 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     console.log('[OCR] Using final edited image');
 
     setIsExtracting(true);
+    setExtractionStage('🖼️ Preprocessing image...');
     setOcrFailed(false);
     setOcrFailMessage('');
     setOcrConfidence(null);
@@ -165,7 +216,9 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
     setImageQualityWarning('');
 
     try {
-      const result = await extractDocumentDetails(uri, selectedType);
+      const result = await extractDocumentDetails(uri, selectedType, (stage) => {
+        setExtractionStage(stage);
+      });
       applyOcrResult(result);
 
       // Show non-blocking quality warning for MEDIUM quality images
@@ -187,6 +240,7 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
       }
     } finally {
       setIsExtracting(false);
+      setExtractionStage('🔍 Extracting document fields...');
     }
   };
 
@@ -436,7 +490,7 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
 
       {/* OCR Loading Overlay */}
       {isExtracting && (
-        <LoadingIndicator overlay message="🔍 Extracting document fields..." />
+        <LoadingIndicator overlay message={extractionStage} />
       )}
 
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -622,8 +676,7 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
           {currentTemplate ? (
             <>
               {currentTemplate.fields.map(field => {
-                const valInfo = validatedFields[field.key] || validatedFields[Object.keys(validatedFields).find(k => k.toLowerCase() === field.key.toLowerCase()) || ''];
-                const fieldValue = dynamicFields[field.key] ?? dynamicFields[Object.keys(dynamicFields).find(k => k.toLowerCase() === field.key.toLowerCase()) || ''] ?? '';
+                const { value: fieldValue, valInfo } = getFieldData(field.key, dynamicFields, validatedFields);
 
                 return (
                   <View key={field.key} style={styles.fieldWrapper}>
@@ -633,8 +686,11 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
                       onChangeText={text => {
                         setDynamicFields(prev => {
                           const updated = { ...prev };
+                          const targetNorm = normalizeKey(field.key);
+                          const allowedAliases = FIELD_ALIAS_MAP[targetNorm] || [targetNorm];
                           for (const k of Object.keys(updated)) {
-                            if (k.toLowerCase() === field.key.toLowerCase() && k !== field.key) {
+                            const kNorm = normalizeKey(k);
+                            if ((kNorm === targetNorm || allowedAliases.includes(kNorm)) && k !== field.key) {
                               delete updated[k];
                             }
                           }
@@ -663,7 +719,7 @@ export const ScanScreen: React.FC<Props> = ({ navigation }) => {
               {/* Additional AI extracted fields not in template */}
               {(() => {
                 const extraFields = Object.entries(dynamicFields).filter(([k]) => {
-                  return !currentTemplate.fields.some(f => f.key.toLowerCase() === k.toLowerCase());
+                  return !isFieldInTemplate(k, currentTemplate.fields);
                 });
                 if (extraFields.length === 0) return null;
 
