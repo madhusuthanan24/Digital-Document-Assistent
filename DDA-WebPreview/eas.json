@@ -16,12 +16,15 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://10.42.190.198:5000"
+        "EXPO_PUBLIC_API_URL": "https://dda-backend-q70w.onrender.com"
       }
     },
     "production": {
       "android": {
         "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://dda-backend-q70w.onrender.com"
       }
     }
   },
