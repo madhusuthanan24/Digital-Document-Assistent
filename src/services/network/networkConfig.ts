@@ -1,14 +1,18 @@
 /**
  * networkConfig.ts — Centralized Backend Network Configuration & Diagnostics
  *
- * Resolves the reachable backend URL for the mobile app, preventing invalid
- * tunnel hostnames (*.exp.direct) from being used for backend port 5000.
+ * Resolves the reachable backend URL for the mobile app, ensuring production
+ * standalone release builds target the live public HTTPS backend and never
+ * fall back to a local laptop IP address or localhost.
  */
 
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 
-// Verified Windows Host LAN IP addresses
+// Verified Production HTTPS Backend URL
+export const PRODUCTION_API_URL = 'https://dda-backend-q70w.onrender.com';
+
+// Local development fallback constants
 export const LAN_WIFI_IP = '10.42.190.198';
 export const LAN_ETHERNET_IP = '172.16.11.223';
 export const BACKEND_PORT = 5000;
@@ -24,9 +28,10 @@ export function resolveBackendNetwork(): NetworkConfigInfo {
   // 1. Explicit environment variable override takes absolute priority
   if (process.env.EXPO_PUBLIC_API_URL) {
     const envUrl = process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '');
+    const isHttps = envUrl.startsWith('https://');
     const hostMatch = envUrl.match(/^https?:\/\/([^/:]+)(?::(\d+))?/);
     const targetHost = hostMatch ? hostMatch[1] : 'unknown';
-    const targetPort = hostMatch && hostMatch[2] ? parseInt(hostMatch[2], 10) : BACKEND_PORT;
+    const targetPort = hostMatch && hostMatch[2] ? parseInt(hostMatch[2], 10) : (isHttps ? 443 : 80);
     return {
       baseUrl: envUrl,
       targetHost,
@@ -35,7 +40,19 @@ export function resolveBackendNetwork(): NetworkConfigInfo {
     };
   }
 
-  // 2. Web platform always talks to localhost
+  // 2. Standalone / Release APK build — strictly use public production URL
+  const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
+  if (!isDev) {
+    const hostMatch = PRODUCTION_API_URL.match(/^https?:\/\/([^/:]+)(?::(\d+))?/);
+    return {
+      baseUrl: PRODUCTION_API_URL,
+      targetHost: hostMatch ? hostMatch[1] : 'dda-backend-q70w.onrender.com',
+      targetPort: 443,
+      connectionMode: 'PRODUCTION_DEFAULT_URL',
+    };
+  }
+
+  // 3. Web platform in development talks to localhost
   if (Platform.OS === 'web') {
     return {
       baseUrl: 'http://localhost:5000',
@@ -45,7 +62,7 @@ export function resolveBackendNetwork(): NetworkConfigInfo {
     };
   }
 
-  // 3. Inspect Expo runtime host configuration
+  // 4. Inspect Expo runtime host configuration in development
   const hostUri =
     Constants.expoConfig?.hostUri ||
     (Constants as any).manifest2?.extra?.expoGo?.debuggerHost ||
@@ -86,13 +103,13 @@ export function resolveBackendNetwork(): NetworkConfigInfo {
     }
   }
 
-  // Fallback for standalone/installed APK or emulator
+  // 5. Development fallback for emulator or local test
   const fallbackIp = Platform.OS === 'android' ? LAN_WIFI_IP : 'localhost';
   return {
     baseUrl: `http://${fallbackIp}:${BACKEND_PORT}`,
     targetHost: fallbackIp,
     targetPort: BACKEND_PORT,
-    connectionMode: Platform.OS === 'android' ? 'STANDALONE_LAN_FALLBACK' : 'STANDALONE_LOCALHOST',
+    connectionMode: Platform.OS === 'android' ? 'DEV_STANDALONE_LAN_FALLBACK' : 'DEV_LOCALHOST',
   };
 }
 
@@ -128,11 +145,11 @@ export async function verifyBackendHealth(): Promise<{ ok: boolean; status: numb
   const baseUrl = getBackendBaseUrl();
   const healthUrl = `${baseUrl}/health`;
 
-  console.log(`[BACKEND_NETWORK] HEALTH_CHECK_START`);
+  console.log(`[BACKEND_NETWORK] HEALTH_CHECK_START: ${healthUrl}`);
 
   try {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), 6000) : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 10000) : null;
 
     const res = await fetch(healthUrl, {
       method: 'GET',
@@ -155,7 +172,7 @@ export async function verifyBackendHealth(): Promise<{ ok: boolean; status: numb
     }
   } catch (err: any) {
     console.warn(`[BACKEND_NETWORK] HEALTH_CHECK_STATUS=0`);
-    console.warn(`[BACKEND_NETWORK] HEALTH_CHECK_RESULT=FAILED`);
+    console.warn(`[BACKEND_NETWORK] HEALTH_CHECK_RESULT=FAILED: ${err?.message}`);
     return { ok: false, status: 0, message: err?.message || 'Network error' };
   }
 }
