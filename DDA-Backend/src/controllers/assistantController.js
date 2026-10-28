@@ -98,7 +98,7 @@ function prepareChatMessages(systemPrompt, history, currentMessage) {
  */
 async function callNvidiaChatApi(apiKey, model, messages, options = {}) {
   const maxAttempts = options.maxAttempts || 2;
-  const timeoutMs = options.timeoutMs || 20000;
+  const timeoutMs = options.timeoutMs || 55000;
   let lastError = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -249,7 +249,7 @@ const processChatMessage = async (req, res) => {
 
     let nvidiaRes;
     try {
-      nvidiaRes = await callNvidiaChatApi(apiKey, model, messages, { timeoutMs: 20000, maxAttempts: 2 });
+      nvidiaRes = await callNvidiaChatApi(apiKey, model, messages, { timeoutMs: 55000, maxAttempts: 2 });
     } catch (apiErr) {
       const errElapsed = Date.now() - nvidiaReqStart;
       console.error(`[ASSISTANT][NVIDIA_CHAT] API Call Exception (+${errElapsed}ms):`, apiErr.message);

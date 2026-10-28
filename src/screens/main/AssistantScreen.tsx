@@ -86,35 +86,40 @@ export const AssistantScreen: React.FC<AssistantScreenProps> = ({ navigation, ro
     setMessages(newHistory);
     setIsLoading(true);
 
-    const conversationHistory = messages.map(m => ({
-      role: m.role,
-      content: m.content,
-    }));
+    try {
+      const conversationHistory = messages.map(m => ({
+        role: m.role,
+        content: m.content,
+      }));
 
-    const response = await sendChatMessage({
-      userId: user?.uid || 'guest_user',
-      message: userText,
-      documentId: documentId || null,
-      conversationHistory,
-    });
+      const response = await sendChatMessage({
+        userId: user?.uid || 'guest_user',
+        message: userText,
+        documentId: documentId || null,
+        conversationHistory,
+      });
 
-    setIsLoading(false);
+      const finishTime = Date.now();
+      console.log(`[ASSISTANT] TOTAL_TIME_MS: ${finishTime - sendStartTime}ms`);
 
-    const finishTime = Date.now();
-    console.log(`[ASSISTANT] TOTAL_TIME_MS: ${finishTime - sendStartTime}ms`);
-
-    if (response.reply) {
-      const aiMsg: ChatMessage = {
-        id: `ai_${Date.now()}`,
-        role: 'assistant',
-        content: response.reply,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        proposal: response.proposal || null,
-        proposalStatus: response.proposal ? 'pending' : undefined,
-      };
-      setMessages(prev => [...prev, aiMsg]);
-    } else {
-      setErrorMsg('AI Assistant is temporarily unavailable. Please try again.');
+      if (response && response.reply) {
+        const aiMsg: ChatMessage = {
+          id: `ai_${Date.now()}`,
+          role: 'assistant',
+          content: response.reply,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          proposal: response.proposal || null,
+          proposalStatus: response.proposal ? 'pending' : undefined,
+        };
+        setMessages(prev => [...prev, aiMsg]);
+      } else {
+        setErrorMsg('AI Assistant could not produce a response. Please try again.');
+      }
+    } catch (chatErr: any) {
+      console.error('[ASSISTANT] Chat error:', chatErr);
+      setErrorMsg(chatErr?.message || 'AI Assistant connection error. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 

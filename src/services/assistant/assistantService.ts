@@ -49,7 +49,7 @@ export async function sendChatMessage(params: SendChatParams): Promise<{
   console.log(`[ASSISTANT][DEBUG] request_id=${requestId}`);
   console.log(`[ASSISTANT][NVIDIA_TIMING] CLIENT_REQUEST_START request_id=${requestId}`);
   console.log(
-    `[ASSISTANT][CLIENT] REQUEST_START request_id=${requestId} url=${requestUrl} timeout_ms=45000 message_len=${
+    `[ASSISTANT][CLIENT] REQUEST_START request_id=${requestId} url=${requestUrl} timeout_ms=90000 message_len=${
       message ? message.length : 0
     } history_count=${Array.isArray(conversationHistory) ? conversationHistory.length : 0}`
   );
@@ -61,7 +61,7 @@ export async function sendChatMessage(params: SendChatParams): Promise<{
 
   console.log(`[ASSISTANT_DIAG] request_start: ${new Date(reqStartTime).toISOString()}`);
   console.log(`[ASSISTANT_DIAG] URL_HOST: ${urlHost}`);
-  console.log(`[ASSISTANT_DIAG] timeout_ms: 45000`);
+  console.log(`[ASSISTANT_DIAG] timeout_ms: 90000`);
   console.log(`[ASSISTANT_DIAG] request_mode: ${documentId ? 'document' : 'general'}`);
   console.log(`[ASSISTANT_DIAG] message_length: ${message ? message.length : 0}`);
   console.log(`[ASSISTANT_DIAG] has_document_id: ${Boolean(documentId)}`);
@@ -72,9 +72,9 @@ export async function sendChatMessage(params: SendChatParams): Promise<{
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timeoutId = controller
       ? setTimeout(() => {
-          console.warn(`[ASSISTANT] REQUEST_ABORT: Timed out after 45 seconds`);
+          console.warn(`[ASSISTANT] REQUEST_ABORT: Timed out after 90 seconds`);
           controller.abort();
-        }, 45000)
+        }, 90000)
       : null;
 
     const res = await fetch(requestUrl, {
@@ -113,7 +113,7 @@ export async function sendChatMessage(params: SendChatParams): Promise<{
     } catch (parseErr: any) {
       console.error(`[ASSISTANT][CLIENT] JSON_PARSE_FAILED request_id=${requestId} error=${parseErr.message}`);
       return {
-        reply: 'AI Assistant received an invalid response format. Please try again.',
+        reply: 'AI Assistant received an invalid response format from backend server. Please try again.',
       };
     }
 
@@ -140,12 +140,16 @@ export async function sendChatMessage(params: SendChatParams): Promise<{
     if (err?.name === 'AbortError') {
       console.warn(`[ASSISTANT][CLIENT] REQUEST_ABORTED request_id=${requestId} elapsed_ms=${elapsed}`);
       return {
-        reply: 'AI Assistant request timed out (45s). Please check your connection and try again.',
+        reply: 'AI Assistant request timed out (90s). The cloud server may still be spinning up from idle, please try again in a few moments.',
       };
     }
     console.warn(`[ASSISTANT][CLIENT] FETCH_ERROR request_id=${requestId} elapsed_ms=${elapsed} error=${err?.message}`);
+    const isProduction = requestUrl.includes('onrender.com');
+    const tip = isProduction
+      ? 'The cloud server may still be spinning up from idle, or your device may have lost Internet connectivity. Please verify your connection and try again.'
+      : `Please ensure the backend server is running and your device is on the same network (${urlHost}).`;
     return {
-      reply: `Cannot connect to DDA Backend server at ${requestUrl}. Please ensure the backend server is running and your device is on the same network (${urlHost}).`,
+      reply: `Cannot connect to DDA Backend at ${requestUrl}. ${tip}`,
     };
   }
 }

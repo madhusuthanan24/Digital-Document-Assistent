@@ -20,12 +20,13 @@ class DocumentService {
    * Prioritizes the canonical backend endpoint / croppedImagePath.
    */
   public getDocumentImageUrl(documentId?: string, imagePath?: string, localFileUri?: string, croppedImagePath?: string): string {
+    const baseUrl = getBackendBaseUrl();
     if (documentId) {
-      return `${API_BASE_URL}/api/documents/${documentId}/image`;
+      return `${baseUrl}/api/documents/${documentId}/image`;
     }
     const path = croppedImagePath || imagePath;
     if (path && !path.startsWith('file://') && !path.startsWith('content://')) {
-      return `${API_BASE_URL}${path.startsWith('/') ? '' : '/'}${path}`;
+      return `${baseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
     }
     if (localFileUri && (localFileUri.startsWith('file://') || localFileUri.startsWith('http://') || localFileUri.startsWith('https://'))) {
       return localFileUri;
@@ -54,7 +55,7 @@ class DocumentService {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', url);
       xhr.setRequestHeader('x-user-id', userId);
-      xhr.timeout = 60000;
+      xhr.timeout = 90000;
 
       xhr.onload = () => {
         let resData: any = null;
@@ -71,11 +72,15 @@ class DocumentService {
       };
 
       xhr.onerror = () => {
-        reject(new Error(`Network request failed (status: ${xhr.status || 'unknown'})`));
+        reject(
+          new Error(
+            `Network request failed (status: ${xhr.status || 'unknown'}). Please verify server connectivity or retry in a moment if the cloud server is waking up.`
+          )
+        );
       };
 
       xhr.ontimeout = () => {
-        reject(new Error('Document upload request timed out after 60 seconds'));
+        reject(new Error('Document upload request timed out after 90 seconds. The cloud server may still be spinning up from idle, please try again.'));
       };
 
       xhr.send(formData);
@@ -93,6 +98,65 @@ class DocumentService {
     console.log(`[POSTGRES_DOC] Saving document: type="${docData.documentType}", name="${docData.documentName}" for user: ${userId}`);
 
     const fileUri = docData.croppedImagePath || docData.localFileUri || docData.imagePath;
+    const uploadUrl = `${getBackendBaseUrl()}/api/documents`;
+    console.log(`[DOCUMENT][NETWORK] REQUEST_URL=${uploadUrl} METHOD=POST`);
+    console.log(`[NETWORK][CONFIG] target_url=${uploadUrl}`);
+    console.log(`[POSTGRES_DOC] Submitting multipart upload to: ${uploadUrl}`);
+
+    // If expo-file-system is available in runtime (e.g. Expo bundle), use native uploadAsync
+    let NativeFS: any = null;
+    try {
+      NativeFS = require('expo-file-system/legacy');
+    } catch {}
+
+    if (Platform.OS !== 'web' && NativeFS?.uploadAsync && fileUri && (fileUri.startsWith('file://') || fileUri.startsWith('content://'))) {
+      try {
+        console.log(`[POSTGRES_DOC] Using native FileSystem.uploadAsync for: ${fileUri}`);
+        const params: Record<string, string> = {
+          userId,
+          documentType: docData.documentType,
+          documentName: docData.documentName,
+        };
+        if (docData.documentNumber) params.documentNumber = docData.documentNumber;
+        if (docData.name) params.name = docData.name;
+        if (docData.fatherName) params.fatherName = docData.fatherName;
+        if (docData.gender) params.gender = docData.gender;
+        if (docData.address) params.address = docData.address;
+        if (docData.dateOfBirth) params.dateOfBirth = docData.dateOfBirth;
+        if (docData.issueDate) params.issueDate = docData.issueDate;
+        if (docData.expiryDate) params.expiryDate = docData.expiryDate;
+        if (docData.fields) params.fields = JSON.stringify(docData.fields);
+
+        const uploadResult = await NativeFS.uploadAsync(uploadUrl, fileUri, {
+          httpMethod: 'POST',
+          uploadType: NativeFS.FileSystemUploadType?.MULTIPART || 1,
+          fieldName: 'file',
+          parameters: params,
+          headers: {
+            'x-user-id': userId,
+          },
+        });
+
+        let resData: any = null;
+        try {
+          resData = JSON.parse(uploadResult.body);
+        } catch {
+          resData = {
+            success: uploadResult.status >= 200 && uploadResult.status < 300,
+            message: uploadResult.body,
+          };
+        }
+
+        if (uploadResult.status >= 200 && uploadResult.status < 300 && resData?.success) {
+          const createdDoc = resData.data;
+          console.log(`[POSTGRES_DOC] PostgreSQL document created via native upload: id=${createdDoc.id}`);
+          return createdDoc.id;
+        }
+      } catch (nativeErr: any) {
+        console.warn(`[POSTGRES_DOC] Native upload fallback: ${nativeErr?.message}`);
+      }
+    }
+
     const formData = new FormData();
 
     formData.append('userId', userId);
@@ -141,10 +205,6 @@ class DocumentService {
       }
     }
 
-    const uploadUrl = `${getBackendBaseUrl()}/api/documents`;
-    console.log(`[DOCUMENT][NETWORK] REQUEST_URL=${uploadUrl} METHOD=POST`);
-    console.log(`[POSTGRES_DOC] Submitting multipart upload to: ${uploadUrl}`);
-
     const res = await this.executeMultipartUpload(uploadUrl, formData, userId);
 
     if (res.ok && res.data?.success) {
@@ -164,8 +224,9 @@ class DocumentService {
   public async getDocuments(userId: string): Promise<DocumentMetadata[]> {
     if (!userId) return [];
     console.log(`[POSTGRES_DOC] Fetching documents for user: ${userId}`);
+    const baseUrl = getBackendBaseUrl();
     try {
-      const response = await fetch(`${API_BASE_URL}/api/documents`, {
+      const response = await fetch(`${baseUrl}/api/documents`, {
         method: 'GET',
         headers: { 'x-user-id': userId },
       });
@@ -183,7 +244,7 @@ class DocumentService {
           const fullImageUrl = rawPath
             ? (rawPath.startsWith('http://') || rawPath.startsWith('https://') || rawPath.startsWith('file://') || rawPath.startsWith('content://')
                 ? rawPath
-                : `${API_BASE_URL}${rawPath.startsWith('/') ? '' : '/'}${rawPath}`)
+                : `${baseUrl}${rawPath.startsWith('/') ? '' : '/'}${rawPath}`)
             : '';
 
           return {
@@ -224,8 +285,9 @@ class DocumentService {
     documentId: string
   ): Promise<DocumentMetadata | null> {
     if (!userId || !documentId) return null;
+    const baseUrl = getBackendBaseUrl();
     try {
-      const response = await fetch(`${API_BASE_URL}/api/documents/${documentId}`, {
+      const response = await fetch(`${baseUrl}/api/documents/${documentId}`, {
         method: 'GET',
         headers: { 'x-user-id': userId },
       });
@@ -243,7 +305,7 @@ class DocumentService {
         const fullImageUrl = rawPath
           ? (rawPath.startsWith('http://') || rawPath.startsWith('https://') || rawPath.startsWith('file://') || rawPath.startsWith('content://')
               ? rawPath
-              : `${API_BASE_URL}${rawPath.startsWith('/') ? '' : '/'}${rawPath}`)
+              : `${baseUrl}${rawPath.startsWith('/') ? '' : '/'}${rawPath}`)
           : '';
 
         return {
@@ -281,7 +343,7 @@ class DocumentService {
     docData: Partial<Omit<DocumentMetadata, 'id' | 'userId' | 'createdAt'>>
   ): Promise<void> {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/documents/${documentId}`, {
+      const response = await fetch(`${getBackendBaseUrl()}/api/documents/${documentId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -311,7 +373,7 @@ class DocumentService {
     documentId: string
   ): Promise<void> {
     try {
-      await fetch(`${API_BASE_URL}/api/documents/${documentId}`, {
+      await fetch(`${getBackendBaseUrl()}/api/documents/${documentId}`, {
         method: 'DELETE',
         headers: { 'x-user-id': userId },
       });
@@ -322,7 +384,7 @@ class DocumentService {
 
   public async getReminders(userId: string): Promise<ExpiryReminder[]> {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/documents/reminders/expiry`, {
+      const response = await fetch(`${getBackendBaseUrl()}/api/documents/reminders/expiry`, {
         method: 'GET',
         headers: { 'x-user-id': userId },
       });
