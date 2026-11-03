@@ -55,7 +55,7 @@ CORE CAPABILITIES & RULES:
    - Valid field_name options: name, documentNumber, fatherName, gender, address, dateOfBirth, issueDate, expiryDate, documentType, documentName, or any relevant field key.
    - Do NOT modify the database automatically; corrections require explicit user confirmation via the proposal.`;
 
-const DEFAULT_NVIDIA_MODEL = 'meta/llama-3.2-11b-vision-instruct';
+const DEFAULT_NVIDIA_MODEL = 'meta/llama-3.2-90b-vision-instruct';
 const NVIDIA_CHAT_ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
 /**
@@ -97,8 +97,8 @@ function prepareChatMessages(systemPrompt, history, currentMessage) {
  * Retries once on transient HTTP 5xx or connection aborts.
  */
 async function callNvidiaChatApi(apiKey, model, messages, options = {}) {
-  const maxAttempts = options.maxAttempts || 2;
-  const timeoutMs = options.timeoutMs || 55000;
+  const maxAttempts = options.maxAttempts || 1;
+  const timeoutMs = options.timeoutMs || 85000;
   let lastError = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -131,8 +131,8 @@ async function callNvidiaChatApi(apiKey, model, messages, options = {}) {
 
       // If status is 5xx and we have remaining attempts, retry after a short delay
       if (!res.ok && res.status >= 500 && attempt < maxAttempts) {
-        console.warn(`[ASSISTANT][NVIDIA_CHAT] Transient HTTP ${res.status} from NVIDIA (attempt ${attempt}/${maxAttempts}). Retrying in 1.5s...`);
-        await new Promise(r => setTimeout(r, 1500));
+        console.warn(`[ASSISTANT][NVIDIA_CHAT] Transient HTTP ${res.status} from NVIDIA (attempt ${attempt}/${maxAttempts}). Retrying in 2s...`);
+        await new Promise(r => setTimeout(r, 2000));
         continue;
       }
 
@@ -140,9 +140,13 @@ async function callNvidiaChatApi(apiKey, model, messages, options = {}) {
     } catch (err) {
       clearTimeout(timer);
       lastError = err;
+      // Do not retry on timeout abort for large 90B model to avoid overloading the inference queue
+      if (err.name === 'AbortError') {
+        throw err;
+      }
       if (attempt < maxAttempts) {
-        console.warn(`[ASSISTANT][NVIDIA_CHAT] Attempt ${attempt}/${maxAttempts} failed (${err.name}: ${err.message}). Retrying in 1.5s...`);
-        await new Promise(r => setTimeout(r, 1500));
+        console.warn(`[ASSISTANT][NVIDIA_CHAT] Attempt ${attempt}/${maxAttempts} failed (${err.name}: ${err.message}). Retrying in 2s...`);
+        await new Promise(r => setTimeout(r, 2000));
         continue;
       }
       throw err;
@@ -249,7 +253,7 @@ const processChatMessage = async (req, res) => {
 
     let nvidiaRes;
     try {
-      nvidiaRes = await callNvidiaChatApi(apiKey, model, messages, { timeoutMs: 55000, maxAttempts: 2 });
+      nvidiaRes = await callNvidiaChatApi(apiKey, model, messages, { timeoutMs: 85000, maxAttempts: 1 });
     } catch (apiErr) {
       const errElapsed = Date.now() - nvidiaReqStart;
       console.error(`[ASSISTANT][NVIDIA_CHAT] API Call Exception (+${errElapsed}ms):`, apiErr.message);
@@ -259,7 +263,7 @@ const processChatMessage = async (req, res) => {
       const backendStatus = apiErr.name === 'AbortError' ? 504 : 502;
       console.log(`[ASSISTANT_NVIDIA] BACKEND_RESPONSE_STATUS=${backendStatus}`);
       if (apiErr.name === 'AbortError') {
-        return errorResponse(res, 'AI Assistant request timed out while contacting NVIDIA AI. Please try again.', 504);
+        return errorResponse(res, 'AI Assistant request timed out while contacting NVIDIA AI (90B model). The model may be under load, please try again.', 504);
       }
       return errorResponse(res, 'AI Assistant network error connecting to NVIDIA AI provider. Please try again.', 502);
     }
@@ -285,7 +289,7 @@ const processChatMessage = async (req, res) => {
       if (errStatus === 401 || errStatus === 403) {
         userErrorMsg = 'AI Assistant authentication failed. Please verify your NVIDIA API key configuration.';
       } else if (errStatus === 404) {
-        userErrorMsg = 'Configured NVIDIA model was not found. Please verify available models.';
+        userErrorMsg = `Configured NVIDIA model (${model}) was not found or function access is restricted. Please verify available models and account entitlement.`;
       } else if (errStatus === 429) {
         userErrorMsg = 'NVIDIA AI rate limit reached. Please wait a moment and try again.';
       } else if (errStatus >= 500) {

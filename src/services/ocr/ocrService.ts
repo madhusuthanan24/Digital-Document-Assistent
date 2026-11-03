@@ -463,9 +463,9 @@ function scoreFieldConfidence(
 async function callNvidiaApiWithBackoff(
   base64Image: string,
   prompt: string,
-  maxRetries = 2,
+  maxRetries = 1,
   temperature?: number,
-  timeoutMs = 40000,
+  timeoutMs = 75000,
   requestId = 'req'
 ): Promise<string> {
   const cleanB64 = base64Image.trim().replace(/^data:image\/[a-z]+;base64,/i, '');
@@ -486,7 +486,7 @@ async function callNvidiaApiWithBackoff(
   };
 
   let attempt = 0;
-  let delayMs = 1000;
+  let delayMs = 1500;
   while (attempt < maxRetries) {
     attempt++;
     logStage(`[${requestId}] API call attempt ${attempt}/${maxRetries}`);
@@ -531,7 +531,8 @@ async function callNvidiaApiWithBackoff(
       throw new Error(`[API_${response.status}] ${errBody.slice(0, 150)}`);
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        throw new Error('NVIDIA Vision AI request timed out. Please check your internet connection and try again.');
+        // Do not retry on timeout abort for 90B model to avoid queue congestion
+        throw new Error('NVIDIA Vision AI (90B) request timed out. Please check your network connection and try again.');
       }
       if (attempt >= maxRetries) throw err;
       console.warn(`[OCR][${requestId}] Exception on attempt ${attempt}: ${err?.message}`);
@@ -554,7 +555,7 @@ async function classifyDocument(
 ): Promise<{ detectedType: string; confidence: string }> {
   logStage(`Running document type detection pass (UI hint: "${userHint || 'none'}")`);
   try {
-    const content = await callNvidiaApiWithBackoff(base64Image, CLASSIFY_ONLY_PROMPT, 2, 0);
+    const content = await callNvidiaApiWithBackoff(base64Image, CLASSIFY_ONLY_PROMPT, 1, 0, 60000);
     let rawType = '';
     let confidence = 'medium';
 
@@ -693,9 +694,9 @@ export async function extractDocumentDetails(
     const rawResponse = await callNvidiaApiWithBackoff(
       base64Image,
       prompt,
-      2,
+      1,
       NVIDIA_CONFIG.temperature,
-      40000,
+      75000,
       requestId
     );
     aiContent = rawResponse;
@@ -725,7 +726,7 @@ export async function extractDocumentDetails(
         fallbackPrompt,
         1,
         0,
-        30000,
+        60000,
         `${requestId}_fb`
       );
       const fbResult = parseAiResponse(fbResponse, documentTypeHint);

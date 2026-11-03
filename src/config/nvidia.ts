@@ -4,7 +4,7 @@ export const NVIDIA_ENDPOINT =
   "https://integrate.api.nvidia.com/v1/chat/completions";
 
 export const NVIDIA_MODEL =
-  "meta/llama-3.2-11b-vision-instruct";
+  "meta/llama-3.2-90b-vision-instruct";
 
 export const NVIDIA_CONFIG = {
   temperature: 0.1,

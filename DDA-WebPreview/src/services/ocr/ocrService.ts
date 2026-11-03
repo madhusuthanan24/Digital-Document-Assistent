@@ -471,9 +471,9 @@ function scoreFieldConfidence(key: string, value: string, fromPlaintext: boolean
 async function callNvidiaApiWithBackoff(
   base64Image: string,
   prompt: string,
-  maxRetries = 2,
+  maxRetries = 1,
   temperature?: number,
-  timeoutMs = 40000,
+  timeoutMs = 75000,
   requestId = 'req'
 ): Promise<string> {
   const cleanB64 = sanitizeBase64(base64Image);
@@ -492,7 +492,7 @@ async function callNvidiaApiWithBackoff(
   };
 
   let attempt = 0;
-  let delayMs = 1000;
+  let delayMs = 1500;
   while (attempt < maxRetries) {
     attempt++;
     logStage(`[${requestId}] API call attempt ${attempt}/${maxRetries}`);
@@ -532,7 +532,7 @@ async function callNvidiaApiWithBackoff(
       throw new Error(`[API_${response.status}] ${responseText.slice(0, 150)}`);
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        throw new Error('NVIDIA Vision AI request timed out. Please check your internet connection and try again.');
+        throw new Error('NVIDIA Vision AI (90B) request timed out. Please check your network connection and try again.');
       }
       if (attempt >= maxRetries) throw err;
       console.warn(`[OCR][${requestId}] Exception attempt ${attempt}: ${err?.message}`);
@@ -693,9 +693,9 @@ export async function extractDocumentDetails(
     const rawResponse = await callNvidiaApiWithBackoff(
       base64Image,
       prompt,
-      2,
+      1,
       NVIDIA_CONFIG.temperature,
-      40000,
+      75000,
       requestId
     );
     aiContent = rawResponse;
@@ -725,7 +725,7 @@ export async function extractDocumentDetails(
         fallbackPrompt,
         1,
         0,
-        30000,
+        60000,
         `${requestId}_fb`
       );
       const fbResult = parseAiResponse(fbResponse, documentTypeHint);

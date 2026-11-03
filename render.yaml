@@ -25,6 +25,8 @@ services:
         sync: false
       - key: ASSISTANT_NVIDIA_API_KEY
         sync: false
+      - key: ASSISTANT_NVIDIA_MODEL
+        value: meta/llama-3.2-90b-vision-instruct
       - key: CLOUDINARY_CLOUD_NAME
         sync: false
       - key: CLOUDINARY_API_KEY
